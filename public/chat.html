@@ -59,6 +59,13 @@
   .task .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3);}
   .phase{font-family:var(--mono);font-size:12px;color:var(--accent2);letter-spacing:1px;margin:18px 0 12px;display:flex;align-items:center;gap:8px;}
   .phase::before{content:"";width:6px;height:6px;border-radius:99px;background:var(--accent2);box-shadow:0 0 8px var(--accent2);}
+  .steps{display:none;flex-direction:column;gap:7px;margin:10px 0 14px;}
+  .steps.on{display:flex;}
+  .step{display:flex;align-items:center;gap:9px;color:var(--ink2);font-size:13px;border:1px solid var(--line);border-radius:9px;padding:8px 11px;background:rgba(255,255,255,.014);}
+  .step .sic{width:15px;text-align:center;color:var(--accent2);font-family:var(--mono);}
+  .step.ok .sic{color:#5ad27e;}
+  .step.warn .sic{color:#ffcf6e;}
+  .step .sd{margin-left:auto;color:var(--ink3);font-family:var(--mono);font-size:11px;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
   .result{margin-top:26px;border-top:1px solid var(--line);padding-top:8px;display:none;}.result.on{display:block;}
   .result h1{font-size:25px;margin:20px 0 10px;}
@@ -111,6 +118,7 @@
   <div class="stream" id="stream">
     <div class="understanding" id="understanding"></div>
     <div class="phase" id="phase">AIOS Brain 理解目标…</div>
+    <div class="steps" id="resultSteps"></div>
     <div class="tasks" id="tasks"></div>
   </div>
 
@@ -130,6 +138,7 @@
     if(es) es.close();
     $('clarify').className = 'clarify'; $('clarify').innerHTML = '';
     $('stream').className = 'stream'; $('understanding').textContent = ''; $('tasks').innerHTML = '';
+    $('resultSteps').className = 'steps'; $('resultSteps').innerHTML = '';
     $('result').className = 'result'; $('result').innerHTML = '';
     $('err').textContent = '';
   }
@@ -181,6 +190,7 @@
     $('stream').className = 'stream on';
     $('result').className = 'result'; $('result').innerHTML = '';
     $('understanding').textContent = ''; $('tasks').innerHTML = '';
+    $('resultSteps').className = 'steps'; $('resultSteps').innerHTML = '';
     $('phase').textContent = 'AIOS Brain 理解目标…';
 
     es = new EventSource('/api/run?goal=' + encodeURIComponent(goal));
@@ -196,10 +206,16 @@
       }
       else if(e.type === 'agent.start'){ setTask(e.subtask.id, 'running'); }
       else if(e.type === 'agent.done'){ setTask(e.result.subtaskId, 'done', e.result.ms); }
-      else if(e.type === 'result.start'){ $('phase').textContent = 'Result Engine 汇总交付…'; }
+      else if(e.type === 'result.start'){
+        $('phase').textContent = 'Result Engine 汇总交付…';
+        $('resultSteps').className = 'steps on';
+        addStep('Result Engine 汇总交付', '', true);
+      }
+      else if(e.type === 'result.step'){ addStep(e.message, e.detail || '', e.ok); }
       else if(e.type === 'result.done'){
         const d = e.deliverable;
         $('phase').textContent = '✓ 交付完成 (' + (d.ms/1000).toFixed(1) + 's)';
+        addStep('交付完成', d.dir || d.artifactPath || '', true);
         $('result').className = 'result on';
         const toUrl = (p) => '/project/' + encodeURI((p.split('/output/')[1]) || '');
         if(d.files && d.files.length){
@@ -233,6 +249,19 @@
     el.className = 'task ' + state;
     el.querySelector('.ic').textContent = state==='done' ? '✓' : (state==='running' ? '◐' : '·');
     if(ms != null) el.querySelector('.ms').textContent = (ms/1000).toFixed(1) + 's';
+  }
+
+  function addStep(message, detail, ok){
+    const box = $('resultSteps');
+    box.className = 'steps on';
+    const cls = ok === false ? 'warn' : ok === true ? 'ok' : '';
+    const icon = ok === false ? '!' : ok === true ? '✓' : '▸';
+    const el = document.createElement('div');
+    el.className = 'step ' + cls;
+    el.innerHTML = '<span class="sic">' + icon + '</span><span>' + esc(message) + '</span>' +
+      (detail ? '<span class="sd">' + esc(detail) + '</span>' : '');
+    box.appendChild(el);
+    el.scrollIntoView({ block: 'nearest' });
   }
 </script>
 </body></html>
