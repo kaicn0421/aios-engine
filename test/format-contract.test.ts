@@ -7,7 +7,37 @@ import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { assemble } from '../src/result';
 import { pdfBrowserCandidates } from '../src/build';
+import { officeFileSignatureOk, officeFormatsFromGoal } from '../src/office-format';
+import { buildOfficeQualityArtifacts } from '../src/office-quality';
 import type { AgentResult, AiosEvent, Plan } from '../src/types';
+
+test('office intent detection covers common Chinese business deliverables', () => {
+  const cases: Array<[string, string[]]> = [
+    ['做一个合同台账模板 字段适合办公室使用', ['xlsx']],
+    ['做一个采购比价表 给项目部用', ['xlsx']],
+    ['做一份资料归档登记表', ['xlsx']],
+    ['做一个会议督办跟踪表', ['xlsx']],
+    ['写一份办公室采购流程优化建议书', ['docx']],
+    ['整理一份项目情况说明', ['docx']],
+    ['做一个月度工作汇报PPT', ['pptx']],
+    ['做一份调研报告并导出PDF', ['docx', 'pdf']],
+  ];
+  for (const [goal, expected] of cases) {
+    assert.deepEqual(officeFormatsFromGoal(goal), expected, goal);
+  }
+});
+
+test('office agent prompt contract forces structured spreadsheet output', () => {
+  const brain = readFileSync(join(process.cwd(), 'src/brain.ts'), 'utf8');
+  const agent = readFileSync(join(process.cwd(), 'src/agent.ts'), 'utf8');
+  assert.match(brain, /必须包含一张 Markdown 表格/);
+  assert.match(brain, /第一行是本任务专属字段/);
+  assert.match(agent, /Excel 输出硬规则/);
+  assert.match(agent, /表头必须贴合本次 prompt 的真实业务字段/);
+  assert.match(agent, /至少 8 个字段、2 行样例数据/);
+  assert.match(agent, /PPT 输出硬规则/);
+  assert.match(agent, /Word\/PDF 输出硬规则/);
+});
 
 test('office Excel delivery writes xlsx instead of html artifact', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-format-'));
@@ -46,7 +76,11 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     assert.ok(d.files?.some((f) => f.name.endsWith('.xlsx')), JSON.stringify(d.files));
     assert.ok(!d.artifactPath, 'office Excel must not be returned as html artifact');
     const readme = readFileSync(join(d.dir!, 'README.md'), 'utf8');
+    assert.match(readme, /Task 满意度/);
+    assert.match(readme, /First-Pass Usable: 是/);
     assert.match(readme, /优先打开: 合同台账模板\.xlsx/);
+    assert.match(readme, /修改说明/);
+    assert.match(readme, /可编辑源文件: 合同台账模板\.xlsx/);
     assert.match(readme, /office_quality_manifest\.json/);
     assert.match(readme, /source_content\.md/);
     assert.match(readme, /delivery_manifest\.json/);
@@ -55,18 +89,43 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     assert.equal(quality.schema, 'aios.office_quality_manifest.v1');
     assert.equal(quality.status, 'pass');
     assert.ok(quality.rules.some((r: string) => /OB|正式交付|Office|Excel|PDF/.test(r)));
+    const xlsxQuality = quality.files.find((f: any) => f.name === '合同台账模板.xlsx');
+    assert.ok(xlsxQuality, JSON.stringify(quality.files));
+    assert.ok(xlsxQuality.checks.some((c: any) => c.id === 'xlsx_prompt_relevance' && c.ok));
+    assert.ok(xlsxQuality.checks.some((c: any) => c.id === 'xlsx_minimum_fields' && c.ok && /主表字段数:20/.test(c.detail)));
+    assert.ok(xlsxQuality.checks.some((c: any) => c.id === 'xlsx_sample_rows' && c.ok));
+    assert.ok(xlsxQuality.checks.some((c: any) => c.id === 'xlsx_table_filter' && c.ok));
     assert.ok(d.delivery_manifest, 'office delivery should write a delivery manifest');
     const manifest = JSON.parse(readFileSync(d.delivery_manifest!, 'utf8'));
     assert.equal(manifest.schema, 'aios.delivery_manifest.v1');
     assert.equal(manifest.primary, '合同台账模板.xlsx');
     assert.equal(manifest.source_content, 'source_content.md');
+    assert.deepEqual(manifest.format_contract.requested_formats, ['xlsx']);
+    assert.equal(manifest.format_contract.primary_format, 'xlsx');
+    assert.equal(manifest.format_contract.html_artifact_allowed, false);
+    assert.equal(manifest.format_contract.compliance, 'pass');
+    assert.equal(manifest.editability.primary_is_editable, true);
+    assert.deepEqual(manifest.editability.editable_sources, ['合同台账模板.xlsx']);
+    assert.equal(manifest.editability.source_content_path, 'source_content.md');
     assert.equal(manifest.smoke.status, 'pass');
     assert.equal(manifest.office_quality.status, 'pass');
+    assert.equal(manifest.task_satisfaction.schema, 'aios.task_satisfaction.v1');
+    assert.equal(manifest.task_satisfaction.north_star, 'first_pass_usable_rate');
+    assert.equal(manifest.task_satisfaction.first_pass_usable, true);
+    assert.equal(manifest.task_satisfaction.verdict, 'ready_to_use', JSON.stringify(manifest.task_satisfaction));
+    assert.ok(manifest.task_satisfaction.score >= 90, JSON.stringify(manifest.task_satisfaction));
+    assert.ok(manifest.task_satisfaction.dimensions.some((d: any) => d.id === 'format_fidelity' && d.score === d.max));
+    assert.ok(manifest.task_satisfaction.dimensions.some((d: any) => d.id === 'business_polish' && d.score >= 12));
+    assert.ok(Array.isArray(manifest.task_satisfaction.feedback_options));
+    assert.ok(d.task_satisfaction, 'assemble should expose task satisfaction to app-server');
+    assert.ok(manifest.smoke.checks.some((c: any) => c.id === 'primary_office_signature' && c.ok));
+    assert.ok(manifest.smoke.checks.some((c: any) => c.id === 'required_office_signatures' && c.ok));
     const primaryEntry = manifest.files.find((f: any) => f.name === '合同台账模板.xlsx');
     assert.ok(primaryEntry, JSON.stringify(manifest.files));
     assert.equal(primaryEntry.role, 'primary');
     assert.ok(primaryEntry.bytes > 1000, JSON.stringify(primaryEntry));
     assert.match(primaryEntry.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(officeFileSignatureOk(primaryEntry.path, 'xlsx'), true);
     const sourceEntry = manifest.files.find((f: any) => f.name === 'source_content.md');
     assert.ok(sourceEntry, JSON.stringify(manifest.files));
     assert.equal(sourceEntry.role, 'source');
@@ -81,6 +140,53 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     assert.ok(steps.some((e) => e.stage === 'quality' && /Office quality verified/.test(e.message)));
     assert.ok(steps.some((e) => e.stage === 'smoke' && e.detail === 'pass'));
     assert.ok(steps.some((e) => e.stage === 'write' && e.detail === 'delivery_manifest.json'));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('office quality fails when Excel content is generic and not prompt-specific', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-xlsx-relevance-'));
+  try {
+    const workbookPath = join(outDir, '设备巡检表.xlsx');
+    const wb = new ExcelJS.Workbook();
+    const main = wb.addWorksheet('业务明细');
+    const dict = wb.addWorksheet('字段说明');
+    const summary = wb.addWorksheet('统计看板');
+    main.views = [{ state: 'frozen', ySplit: 4 }];
+    main.pageSetup = { fitToPage: true, orientation: 'landscape' } as any;
+    main.getRow(4).values = ['设备编号', '设备名称', '巡检日期', '巡检人', '位置', '风险等级', '当前状态', '处理措施', '备注'];
+    main.getRow(5).values = ['SB-001', '空调', '2026-06-05', '张三', '一楼', '低', '正常', '定期清洁', '示例'];
+    main.getRow(6).values = ['SB-002', '水泵', '2026-06-05', '李四', '机房', '中', '待处理', '更换配件', '示例'];
+    main.addTable({
+      name: '业务明细',
+      ref: 'A4',
+      headerRow: true,
+      totalsRow: false,
+      columns: ['设备编号', '设备名称', '巡检日期', '巡检人', '位置', '风险等级', '当前状态', '处理措施', '备注'].map((name) => ({ name, filterButton: true })),
+      rows: [
+        ['SB-001', '空调', '2026-06-05', '张三', '一楼', '低', '正常', '定期清洁', '示例'],
+        ['SB-002', '水泵', '2026-06-05', '李四', '机房', '中', '待处理', '更换配件', '示例'],
+      ],
+    });
+    main.getCell('G5').dataValidation = { type: 'list', allowBlank: true, formulae: ['"正常,待处理"'] };
+    main.getCell('I7').value = { formula: 'COUNTA(A5:A6)' };
+    dict.getRow(1).values = ['字段', '填写说明'];
+    dict.getRow(2).values = ['设备编号', '填写设备编码'];
+    summary.getRow(1).values = ['指标', '值'];
+    summary.getRow(2).values = ['设备数', { formula: 'COUNTA(业务明细!A5:A6)' }];
+    await wb.xlsx.writeFile(workbookPath);
+
+    const quality = await buildOfficeQualityArtifacts(
+      '做一个合同台账Excel模板 字段适合办公室使用',
+      [{ name: '设备巡检表.xlsx', path: workbookPath }],
+      outDir,
+      true,
+    );
+    assert.equal(quality.manifest.status, 'fail');
+    const xlsxQuality = quality.manifest.files.find((f: any) => f.name === '设备巡检表.xlsx');
+    assert.ok(xlsxQuality, JSON.stringify(quality.files));
+    assert.ok(xlsxQuality.checks.some((c: any) => c.id === 'xlsx_prompt_relevance' && !c.ok), JSON.stringify(xlsxQuality.checks));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -269,6 +375,63 @@ test('generic office spreadsheet prompts use commercial ledger template', async 
   }
 });
 
+test('dynamic office spreadsheet keeps prompt-specific fields instead of fixed template', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-dynamic-xlsx-'));
+  try {
+    const plan: Plan = {
+      goal: '做一个采购比价表 给中铁项目部用\n\n# AIOS 办公交付物质量契约\n{"schema":"aios.office_deliverable_profile.v1","formats":["xlsx"]}',
+      understanding: '生成采购比价 Excel 表',
+      kind: 'document',
+      subtasks: [{
+        id: 's1',
+        title: '采购比价字段设计',
+        objective: '生成可编辑采购比价表',
+        skill: 'data',
+        complexity: 'standard',
+        dependsOn: [],
+        outFile: '采购比价台账.xlsx',
+      }],
+    };
+    const results: AgentResult[] = [{
+      subtaskId: 's1',
+      title: '采购比价字段设计',
+      skill: 'data',
+      model: 'mock',
+      ok: true,
+      ms: 1,
+      output: [
+        '| 物资名称 | 规格型号 | 单位 | 数量 | 供应商A报价 | 供应商B报价 | 交货周期 | 推荐供应商 | 推荐理由 | 经办人 | 状态 | 备注 |',
+        '|---|---|---|---:|---:|---:|---|---|---|---|---|---|',
+        '| 钢筋 | HRB400E Φ16 | 吨 | 30 | 3850 | 3820 | 3天 | 供应商B | 总价低且交期满足 | 张三 | 待审批 | 示例 |',
+        '| 水泥 | P.O42.5 散装 | 吨 | 80 | 410 | 406 | 2天 | 供应商B | 单价低 | 李四 | 已比价 | 示例 |',
+      ].join('\n'),
+    }];
+    const d = await assemble(plan, results, 1, outDir);
+    const xlsx = d.files?.find((f) => f.name === '采购比价台账.xlsx');
+    assert.ok(xlsx, JSON.stringify(d.files));
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(xlsx.path);
+    const main = wb.getWorksheet('业务明细');
+    assert.ok(main, 'dynamic workbook should use a prompt-specific business detail sheet');
+    const headers = (main.getRow(4).values as any[]).slice(1);
+    assert.deepEqual(headers.slice(0, 12), ['物资名称', '规格型号', '单位', '数量', '供应商A报价', '供应商B报价', '交货周期', '推荐供应商', '推荐理由', '经办人', '状态', '备注']);
+    assert.equal(main.getCell('A5').value, '钢筋');
+    assert.equal(main.getCell('E5').value, '3850');
+    assert.equal(main.getCell('K5').dataValidation?.type, 'list');
+    assert.ok(wb.getWorksheet('字段说明'), 'dynamic workbook should include field dictionary');
+    assert.ok(wb.getWorksheet('统计看板'), 'dynamic workbook should include dashboard');
+    const qualityFile = d.files?.find((f) => f.name === 'office_quality_manifest.json');
+    assert.ok(qualityFile, JSON.stringify(d.files));
+    const quality = JSON.parse(readFileSync(qualityFile.path, 'utf8'));
+    assert.equal(quality.status, 'pass');
+    const q = quality.files.find((f: any) => f.name === '采购比价台账.xlsx');
+    assert.ok(q.checks.some((c: any) => c.id === 'xlsx_minimum_fields' && c.ok && /主表字段数:12/.test(c.detail)));
+    assert.ok(q.checks.some((c: any) => c.id === 'xlsx_table_filter' && c.ok));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
 test('office presentation prompts deliver structured editable pptx decks', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-pptx-'));
   try {
@@ -320,6 +483,15 @@ test('office presentation prompts deliver structured editable pptx decks', async
     const slideFiles = [...zipText.matchAll(/ppt\/slides\/slide\d+\.xml/g)].map((m) => m[0]);
     assert.ok(new Set(slideFiles).size >= 5, `deck should include cover, agenda, and content slides: ${slideFiles.join(',')}`);
     assert.match(zipText, /ppt\/theme\/theme1\.xml/, 'deck should include a theme');
+    const qualityFile = d.files?.find((f) => f.name === 'office_quality_manifest.json');
+    assert.ok(qualityFile, JSON.stringify(d.files));
+    const quality = JSON.parse(readFileSync(qualityFile.path, 'utf8'));
+    const pptxQuality = quality.files.find((f: any) => f.name === '月度工作汇报.pptx');
+    assert.ok(pptxQuality, JSON.stringify(quality.files));
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_has_real_text' && c.ok));
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_has_flow' && c.ok));
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_not_single_dump' && c.ok));
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_prompt_relevance' && c.ok));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -358,6 +530,56 @@ test('office presentation keeps long section content by adding continuation slid
     const zipText = readFileSync(pptx.path, 'latin1');
     const slides = new Set([...zipText.matchAll(/ppt\/slides\/slide\d+\.xml/g)].map((m) => m[0]));
     assert.ok(slides.size >= 4, `long section should create continuation slides instead of truncating content: ${[...slides].join(',')}`);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('office presentation auto-structures flat business notes into usable slides', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-pptx-flat-'));
+  try {
+    const plan: Plan = {
+      goal: '做一个中铁办公室月度工作汇报PPT 要正式一点\n\n# AIOS 办公交付物质量契约\n{"schema":"aios.office_deliverable_profile.v1","formats":["pptx"]}',
+      understanding: '生成可编辑办公室 PPT 汇报',
+      kind: 'document',
+      subtasks: [{
+        id: 's1',
+        title: '月度工作汇报',
+        objective: '生成正式办公室汇报 PPT',
+        skill: 'writing',
+        complexity: 'standard',
+        dependsOn: [],
+        outFile: '月度工作汇报.pptx',
+      }],
+    };
+    const results: AgentResult[] = [{
+      subtaskId: 's1',
+      title: '月度工作汇报',
+      skill: 'writing',
+      model: 'mock',
+      ok: true,
+      ms: 1,
+      output: [
+        '中铁办公室月度工作汇报',
+        '本月重点完成合同归档、资料台账整理和会议事项督办。',
+        '当前问题是部分部门反馈滞后,存在资料补交不及时风险。',
+        '下一步计划推进台账标准化,落实责任人和截止日期。',
+        '数据依据来自办公室月度统计和会议纪要台账。',
+      ].join('\n'),
+    }];
+    const d = await assemble(plan, results, 1, outDir);
+    const pptx = d.files?.find((f) => f.name === '月度工作汇报.pptx');
+    assert.ok(pptx, JSON.stringify(d.files));
+    const zipText = readFileSync(pptx.path, 'latin1');
+    const slides = new Set([...zipText.matchAll(/ppt\/slides\/slide\d+\.xml/g)].map((m) => m[0]));
+    assert.ok(slides.size >= 5, `flat notes should become cover/agenda/content slides: ${[...slides].join(',')}`);
+    const qualityFile = d.files?.find((f) => f.name === 'office_quality_manifest.json');
+    assert.ok(qualityFile, JSON.stringify(d.files));
+    const quality = JSON.parse(readFileSync(qualityFile.path, 'utf8'));
+    assert.equal(quality.status, 'pass');
+    const pptxQuality = quality.files.find((f: any) => f.name === '月度工作汇报.pptx');
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_has_flow' && c.ok));
+    assert.ok(pptxQuality.checks.some((c: any) => c.id === 'pptx_prompt_relevance' && c.ok));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
@@ -409,6 +631,120 @@ test('office report prompts deliver real editable docx files', async () => {
     const xml = execFileSync('unzip', ['-p', docx.path, 'word/document.xml'], { encoding: 'utf8', timeout: 5000 });
     assert.match(xml.replace(/<[^>]+>/g, ''), /办公室采购流程优化建议书/);
     assert.match(xml, /word\/|w:document|采购流程优化建议书/);
+    const qualityFile = d.files?.find((f) => f.name === 'office_quality_manifest.json');
+    assert.ok(qualityFile, JSON.stringify(d.files));
+    const quality = JSON.parse(readFileSync(qualityFile.path, 'utf8'));
+    const docxQuality = quality.files.find((f: any) => f.name === '采购流程优化建议书.docx');
+    assert.ok(docxQuality, JSON.stringify(quality.files));
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_heading_hierarchy' && c.ok));
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_table_or_action_list' && c.ok));
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_prompt_relevance' && c.ok));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('office quality fails when Word content is generic and not prompt-specific', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-docx-relevance-'));
+  try {
+    const plan: Plan = {
+      goal: '做一份办公室采购流程优化建议书 Word文档\n\n# AIOS 办公交付物质量契约\n{"schema":"aios.office_deliverable_profile.v1","formats":["docx"]}',
+      understanding: '生成正式办公室 Word 建议书',
+      kind: 'document',
+      subtasks: [{
+        id: 's1',
+        title: '采购流程优化建议',
+        objective: '生成可编辑 Word 文档',
+        skill: 'writing',
+        complexity: 'standard',
+        dependsOn: [],
+        outFile: '采购流程优化建议书.docx',
+      }],
+    };
+    const results: AgentResult[] = [{
+      subtaskId: 's1',
+      title: '采购流程优化建议',
+      skill: 'writing',
+      model: 'mock',
+      ok: true,
+      ms: 1,
+      output: [
+        '# 通用材料',
+        '',
+        '## 一、事项',
+        '- 请各部门按时提交材料。',
+        '',
+        '## 二、下一步',
+        '| 序号 | 措施 | 责任部门 |',
+        '|---|---|---|',
+        '| 1 | 按计划推进 | 综合部 |',
+      ].join('\n'),
+    }];
+    const d = await assemble(plan, results, 1, outDir);
+    assert.ok(d.delivery_manifest);
+    const manifest = JSON.parse(readFileSync(d.delivery_manifest!, 'utf8'));
+    assert.equal(manifest.format_contract.compliance, 'fail');
+    assert.equal(manifest.office_quality.status, 'fail');
+    assert.equal(manifest.task_satisfaction.schema, 'aios.task_satisfaction.v1');
+    assert.equal(manifest.task_satisfaction.first_pass_usable, false);
+    assert.equal(manifest.task_satisfaction.verdict, 'needs_repair');
+    assert.ok(manifest.task_satisfaction.score < 80, JSON.stringify(manifest.task_satisfaction));
+    const readme = readFileSync(join(d.dir!, 'README.md'), 'utf8');
+    assert.match(readme, /需返修/);
+    assert.match(readme, /First-Pass Usable: 否/);
+    const quality = JSON.parse(readFileSync(d.office_quality_manifest!, 'utf8'));
+    const docxQuality = quality.files.find((f: any) => f.name === '采购流程优化建议书.docx');
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_prompt_relevance' && !c.ok));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('office report auto-structures flat notes without inventing facts', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-office-docx-flat-'));
+  try {
+    const plan: Plan = {
+      goal: '做一份中铁办公室资料归档优化方案 Word文档\n\n# AIOS 办公交付物质量契约\n{"schema":"aios.office_deliverable_profile.v1","formats":["docx"]}',
+      understanding: '生成正式办公室 Word 方案',
+      kind: 'document',
+      subtasks: [{
+        id: 's1',
+        title: '资料归档优化方案',
+        objective: '生成可编辑 Word 文档',
+        skill: 'writing',
+        complexity: 'standard',
+        dependsOn: [],
+        outFile: '资料归档优化方案.docx',
+      }],
+    };
+    const results: AgentResult[] = [{
+      subtaskId: 's1',
+      title: '资料归档优化方案',
+      skill: 'writing',
+      model: 'mock',
+      ok: true,
+      ms: 1,
+      output: [
+        '中铁办公室资料归档优化方案',
+        '办公室当前需要统一资料归档口径。',
+        '资料台账要覆盖合同、会议纪要、审批材料和移交记录。',
+        '主要风险是部分资料反馈滞后,影响后续检查。',
+        '下一步建议建立归档清单,明确责任人和截止日期。',
+      ].join('\n'),
+    }];
+    const d = await assemble(plan, results, 1, outDir);
+    const docx = d.files?.find((f) => f.name === '资料归档优化方案.docx');
+    assert.ok(docx, JSON.stringify(d.files));
+    const text = execFileSync('unzip', ['-p', docx.path, 'word/document.xml'], { encoding: 'utf8', timeout: 5000 }).replace(/<[^>]+>/g, '');
+    assert.match(text, /一、执行摘要/);
+    assert.match(text, /二、正文事项/);
+    assert.match(text, /三、风险与建议/);
+    assert.match(text, /四、下一步/);
+    assert.match(text, /资料归档/);
+    const quality = JSON.parse(readFileSync(d.office_quality_manifest!, 'utf8'));
+    assert.equal(quality.status, 'pass');
+    const docxQuality = quality.files.find((f: any) => f.name === '资料归档优化方案.docx');
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_prompt_relevance' && c.ok));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

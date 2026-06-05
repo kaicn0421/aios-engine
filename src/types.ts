@@ -49,6 +49,7 @@ export interface Deliverable {
   evidence_manifest?: string;   // evidence_manifest.json 路径
   office_quality_manifest?: string; // office_quality_manifest.json 路径
   delivery_manifest?: string;   // delivery_manifest.json 路径
+  task_satisfaction?: unknown;  // aios.task_satisfaction.v1,首轮可用度评分
 }
 
 /** Skill 名 */

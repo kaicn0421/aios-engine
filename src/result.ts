@@ -7,23 +7,13 @@ import { llm, CONFIG } from './config';
 import { extractHtml, writeArtifact, sanitizeName, writeDeliverable } from './build';
 import { buildFreshnessArtifacts, type FreshnessSummary } from './freshness';
 import { buildOfficeQualityArtifacts, isOfficeDelivery } from './office-quality';
+import {
+  defaultOutFileForFormat,
+  officeFileSignatureOk,
+  officeFormatsFromGoal,
+  officePrimaryExt,
+} from './office-format';
 import type { AgentResult, Deliverable, EventSink, Plan } from './types';
-
-function officeFormatsFromGoal(goal: string): string[] {
-  const match = goal.match(/"formats"\s*:\s*\[([\s\S]*?)\]/);
-  if (match) {
-    return [...new Set([...match[1]!.matchAll(/"([a-z0-9]+)"/gi)]
-      .map((m) => m[1]!.toLowerCase())
-      .filter((ext) => ['docx', 'pdf', 'xlsx', 'pptx', 'md'].includes(ext)))];
-  }
-  const compact = goal.toLowerCase().replace(/\s+/g, '');
-  const formats: string[] = [];
-  if (/pptx?|powerpoint|幻灯片|演示/.test(compact)) formats.push('pptx');
-  if (/excel|xlsx|表格|台账|清单|报表/.test(compact)) formats.push('xlsx');
-  if (/word|docx/.test(compact)) formats.push('docx');
-  if (/pdf/.test(compact)) formats.push('pdf');
-  return [...new Set(formats)];
-}
 
 function extOf(name: string): string {
   return (name.split('.').pop() || '').toLowerCase();
@@ -31,24 +21,6 @@ function extOf(name: string): string {
 
 function withoutExt(name: string): string {
   return name.replace(/\.[^.]+$/, '');
-}
-
-function defaultOutFileForFormat(goal: string, ext: string): string {
-  const compact = goal.replace(/\s+/g, '');
-  const base = /报销|费用|发票|票据/i.test(compact)
-    ? '费用报销台账模板'
-    : /会议|纪要|督办|待办|闭环/i.test(compact)
-      ? '会议事项跟踪清单'
-      : /合同/i.test(compact)
-        ? '合同台账模板'
-        : /台账|excel|xlsx|表格|清单|报表/i.test(compact)
-          ? '办公台账模板'
-          : /ppt|pptx|汇报|演示/i.test(compact)
-            ? '汇报材料'
-            : /报告|调研|研究/i.test(compact)
-              ? '调研报告'
-              : 'AIOS交付物';
-  return `${base}.${ext}`;
 }
 
 function primaryFileName(files: Array<{ name: string; path: string }>, requiredFormats: string[]): string {
@@ -97,6 +69,10 @@ function fileRole(name: string, primary: string): DeliveryManifestFile['role'] {
   return 'support';
 }
 
+function isEditableOfficeExt(ext: string): boolean {
+  return ['xlsx', 'pptx', 'docx'].includes(ext);
+}
+
 function manifestFileEntry(file: { name: string; path: string }, primary: string, manifestPath: string): DeliveryManifestFile {
   const role = fileRole(file.name, primary);
   const isSelf = file.path === manifestPath;
@@ -122,6 +98,8 @@ function deliverySmoke(
   const primaryEntry = entries.find((f) => f.name === primary);
   const sourceEntry = entries.find((f) => f.name === 'source_content.md');
   const nonSelfEntries = entries.filter((f) => f.role !== 'manifest');
+  const primaryExt = extOf(primary);
+  const officeRequiredFormats = requiredFormats.filter((ext) => ['xlsx', 'pptx', 'docx', 'pdf'].includes(ext));
   const checks = [
     {
       id: 'primary_exists',
@@ -137,6 +115,20 @@ function deliverySmoke(
       id: 'required_formats_present',
       ok: requiredFormats.every((ext) => entries.some((f) => f.ext === ext && f.exists && f.bytes > 0)),
       detail: requiredFormats.length ? requiredFormats.join(', ') : 'none',
+    },
+    {
+      id: 'primary_office_signature',
+      ok: !['xlsx', 'pptx', 'docx', 'pdf'].includes(primaryExt)
+        || Boolean(primaryEntry && officeFileSignatureOk(primaryEntry.path, primaryExt)),
+      detail: primary,
+    },
+    {
+      id: 'required_office_signatures',
+      ok: officeRequiredFormats.every((ext) =>
+        entries
+          .filter((f) => f.ext === ext)
+          .every((f) => officeFileSignatureOk(f.path, ext))),
+      detail: officeRequiredFormats.length ? officeRequiredFormats.join(', ') : 'none',
     },
     {
       id: 'files_integrity',
@@ -160,6 +152,78 @@ function deliverySmoke(
   return {
     status: hardFailures.length ? 'fail' : warnings.length ? 'warn' : 'pass',
     checks,
+  };
+}
+
+function checkOk(checks: Array<{ id: string; ok: boolean }>, id: string): boolean {
+  return checks.some((c) => c.id === id && c.ok);
+}
+
+function qualityCheckOk(
+  quality: Awaited<ReturnType<typeof buildOfficeQualityArtifacts>> | undefined,
+  id: string,
+): boolean {
+  if (!quality) return true;
+  return quality.manifest.files.some((file) => file.checks.some((c) => c.id === id && c.ok));
+}
+
+function promptRelevanceChecksPass(
+  quality: Awaited<ReturnType<typeof buildOfficeQualityArtifacts>> | undefined,
+): boolean {
+  if (!quality) return true;
+  const checks = quality.manifest.files.flatMap((file) =>
+    file.checks.filter((c) => c.id.endsWith('_prompt_relevance')));
+  if (checks.length === 0) return true;
+  return checks.every((c) => c.ok);
+}
+
+function scoreBand(score: number): string {
+  if (score >= 90) return '可直接交付';
+  if (score >= 80) return '可用,建议小修';
+  if (score >= 60) return '有价值但必须修复';
+  return '任务失败或有信任风险';
+}
+
+function buildTaskSatisfaction(
+  requiredFormats: string[],
+  deliveryCompliance: 'pass' | 'fail',
+  smoke: ReturnType<typeof deliverySmoke>,
+  quality: Awaited<ReturnType<typeof buildOfficeQualityArtifacts>> | undefined,
+  freshness: Awaited<ReturnType<typeof buildFreshnessArtifacts>>,
+  editableSourceNames: string[],
+  failed: AgentResult[],
+) {
+  const formatOk = deliveryCompliance === 'pass'
+    && checkOk(smoke.checks, 'required_formats_present')
+    && checkOk(smoke.checks, 'required_office_signatures');
+  const freshnessRequired = Boolean(freshness.freshness_summary);
+  const freshnessOk = !freshnessRequired || freshness.freshness_verified;
+  const qualityStatus = quality?.manifest.status || 'not_required';
+  const qualityScore = quality?.manifest.score ?? 100;
+  const promptRelevant = promptRelevanceChecksPass(quality);
+  const dimensions = [
+    { id: 'intent_fit', label: '需求理解', max: 15, score: promptRelevant && failed.length === 0 ? 15 : 8 },
+    { id: 'format_fidelity', label: '格式忠诚', max: 15, score: formatOk ? 15 : 0 },
+    { id: 'content_accuracy', label: '内容准确', max: 20, score: freshnessOk && qualityStatus !== 'fail' ? 20 : freshnessOk ? 12 : 0 },
+    { id: 'source_evidence', label: '来源证据', max: 15, score: freshnessRequired ? (freshnessOk ? 15 : 5) : 10 },
+    { id: 'business_polish', label: '商用品质', max: 15, score: Math.round((Math.max(0, Math.min(100, qualityScore)) / 100) * 15) },
+    { id: 'editability', label: '可编辑性', max: 10, score: requiredFormats.length === 0 || editableSourceNames.length > 0 ? 10 : 0 },
+    { id: 'actionability', label: '行动闭环', max: 5, score: checkOk(smoke.checks, 'source_content_exists') ? 5 : 3 },
+    { id: 'risk_transparency', label: '风险透明', max: 5, score: quality || freshnessRequired ? 5 : 3 },
+  ];
+  const score = dimensions.reduce((sum, d) => sum + d.score, 0);
+  const firstPassUsable = score >= 80 && deliveryCompliance === 'pass' && freshnessOk && qualityStatus !== 'fail';
+  const verdict = !firstPassUsable && score < 80 ? 'needs_repair' : score < 90 ? 'review_recommended' : 'ready_to_use';
+  return {
+    schema: 'aios.task_satisfaction.v1',
+    north_star: 'first_pass_usable_rate',
+    score,
+    band: scoreBand(score),
+    verdict,
+    first_pass_usable: firstPassUsable,
+    dimensions,
+    feedback_options: ['可直接用', '需要小改', '不能用'],
+    feedback_reasons: ['格式不对', '内容不准', '数据旧', '排版差', '不符合单位口径', '少了来源', '没按我的要求', '任务没闭环'],
   };
 }
 
@@ -234,6 +298,7 @@ export async function assemble(
   emit: EventSink = () => {},
 ): Promise<Deliverable> {
   const requiredFormats = officeFormatsFromGoal(plan.goal);
+  const primaryFormat = officePrimaryExt(requiredFormats);
   // artifact:把 code Agent 的产出落地成可运行的单文件成品
   if (plan.kind === 'artifact' && requiredFormats.length === 0) {
     const codeRes = results.find((r) => r.skill === 'code' && r.ok);
@@ -338,12 +403,23 @@ export async function assemble(
     const primary = primaryFileName(files, requiredFormats);
     const deliveryManifestPath = join(dir, 'delivery_manifest.json');
     const filesForReadme = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
-    const readme =
+    const editableSourceNames = filesForReadme
+      .filter((f) => isEditableOfficeExt(extOf(f.name)))
+      .map((f) => f.name);
+    const qualityWarning = quality && quality.manifest.status !== 'pass'
+      ? `## 需返修\n\n- Office 质量状态:${quality.manifest.status}\n- 质量分:${quality.manifest.score}\n- 请先查看 office_quality_manifest.json / OFFICE_DELIVERY_CHECKLIST.md,修复失败项后再对外发送。\n\n`
+      : '';
+    let readme =
       `# ${plan.goal}\n\n> ${plan.understanding}\n\n## 使用说明\n\n` +
       `- 优先打开: ${primary}\n` +
       `- 源文件可继续编辑;若包含 PDF,PDF 适合发送/打印,源文件适合修改复用。\n` +
       `- 需要继续修改内容时,可先看 source_content.md;需要机器可读交付清单时,看 delivery_manifest.json。\n` +
       `- 若数据/价格/行情类交付被标记为需修复,请先看 freshness_summary / sources / data 底稿。\n\n` +
+      `## 修改说明\n\n` +
+      `- 可编辑源文件: ${editableSourceNames.length ? editableSourceNames.join('、') : '无'}\n` +
+      `- 修改建议:优先改主文件 ${primary};source_content.md 是内容底稿,delivery_manifest.json 是验收清单。\n` +
+      `- 对外发送:如有 PDF,优先发送 PDF;如需继续协作,发送可编辑源文件。\n\n` +
+      qualityWarning +
       (quality ? `## 质量验收\n\n- 质量分: ${quality.manifest.score}\n- 状态: ${quality.manifest.status}\n- 详见: office_quality_manifest.json / OFFICE_DELIVERY_CHECKLIST.md\n\n` : '') +
       `## 执行摘要\n\n${sum}\n\n## 交付文件\n` +
       filesForReadme.map((f) => `- ${f.name}`).join('\n') + '\n';
@@ -352,8 +428,20 @@ export async function assemble(
     files.unshift({ name: 'README.md', path: readmePath });
     const finalFiles = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
     writeFileSync(deliveryManifestPath, '', 'utf8');
-    const manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
-    const smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
+    let manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
+    let smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
+    const deliveryCompliance: 'pass' | 'fail' = smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass';
+    const taskSatisfaction = buildTaskSatisfaction(requiredFormats, deliveryCompliance, smoke, quality, freshness, editableSourceNames, failed);
+    const satisfactionBlock =
+      `## Task 满意度\n\n` +
+      `- 分数: ${taskSatisfaction.score}/100\n` +
+      `- 判断: ${taskSatisfaction.band}\n` +
+      `- First-Pass Usable: ${taskSatisfaction.first_pass_usable ? '是' : '否'}\n` +
+      `- 反馈选项: ${taskSatisfaction.feedback_options.join(' / ')}\n\n`;
+    readme = readme.replace('## 执行摘要', `${satisfactionBlock}## 执行摘要`);
+    writeFileSync(readmePath, readme, 'utf8');
+    manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
+    smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
     emit({
       type: 'result.step',
       stage: 'smoke',
@@ -369,6 +457,17 @@ export async function assemble(
       understanding: plan.understanding,
       primary,
       required_formats: requiredFormats,
+      format_contract: {
+        requested_formats: requiredFormats,
+        primary_format: primaryFormat,
+        html_artifact_allowed: requiredFormats.length === 0,
+        compliance: deliveryCompliance,
+      },
+      editability: {
+        primary_is_editable: isEditableOfficeExt(extOf(primary)),
+        editable_sources: editableSourceNames,
+        source_content_path: 'source_content.md',
+      },
       source_content: 'source_content.md',
       smoke,
       freshness: {
@@ -383,6 +482,7 @@ export async function assemble(
         manifest_path: 'office_quality_manifest.json',
         checklist_path: 'OFFICE_DELIVERY_CHECKLIST.md',
       } : null,
+      task_satisfaction: taskSatisfaction,
       files: manifestFiles,
     }, null, 2), 'utf8');
     files.push({ name: 'delivery_manifest.json', path: deliveryManifestPath });
@@ -401,6 +501,7 @@ export async function assemble(
       evidence_manifest: freshness.evidence_manifest,
       office_quality_manifest: quality ? join(dir, 'office_quality_manifest.json') : undefined,
       delivery_manifest: deliveryManifestPath,
+      task_satisfaction: taskSatisfaction,
     };
   }
 

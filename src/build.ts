@@ -54,6 +54,45 @@ function mdToHtml(md: string): string {
     `</style></head><body>${body}</body></html>`;
 }
 
+function normalizeFormalDocumentMarkdown(md: string): string {
+  const raw = md.trim();
+  if (/^#{1,3}\s/m.test(raw) && /一、|二、|执行摘要|结论|建议|下一步|风险|事项|通知|报告/m.test(raw)) return raw;
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s*/, '').replace(/^#{1,6}\s*/, ''));
+  if (lines.length < 3) return raw;
+  const title = lines.shift() || '正式材料';
+  const buckets: Record<'summary' | 'body' | 'risk' | 'next', string[]> = {
+    summary: [],
+    body: [],
+    risk: [],
+    next: [],
+  };
+  for (const line of lines) {
+    if (/问题|风险|不足|滞后|缺口|困难|待协调|异常/.test(line)) buckets.risk.push(line);
+    else if (/下一步|计划|后续|推进|完成|落实|优化|安排|建议|措施/.test(line)) buckets.next.push(line);
+    else if (buckets.summary.length < 2) buckets.summary.push(line);
+    else buckets.body.push(line);
+  }
+  return [
+    `# ${title}`,
+    '',
+    '## 一、执行摘要',
+    ...(buckets.summary.length ? buckets.summary : lines.slice(0, 2)).map((line) => `- ${line}`),
+    '',
+    '## 二、正文事项',
+    ...(buckets.body.length ? buckets.body : lines.slice(2)).map((line) => `- ${line}`),
+    '',
+    '## 三、风险与建议',
+    ...(buckets.risk.length ? buckets.risk : ['原文未提供明确风险项,需人工补充。']).map((line) => `- ${line}`),
+    '',
+    '## 四、下一步',
+    ...(buckets.next.length ? buckets.next : ['原文未提供下一步安排,需补充责任人和时间节点。']).map((line) => `- ${line}`),
+  ].join('\n');
+}
+
 function hasCmd(cmd: string): boolean {
   try { execSync(`command -v ${cmd}`, { stdio: 'ignore' }); return true; } catch { return false; }
 }
@@ -70,7 +109,7 @@ function ensureInstalled(pkg: string): void {
 
 /** md → docx:macOS 可用 textutil;跨平台包内置 html-to-docx 兜底 */
 async function toDocx(md: string, fp: string): Promise<void> {
-  const html = mdToHtml(md);
+  const html = mdToHtml(normalizeFormalDocumentMarkdown(md));
   if (process.env.AIOS_FORCE_HTML_TO_DOCX !== '1' && hasCmd('textutil')) {
     const tmp = fp + '.tmp.html';
     writeFileSync(tmp, html, 'utf8');
@@ -140,7 +179,7 @@ async function toPdf(md: string, fp: string): Promise<void> {
   }
   try {
     const page = await browser.newPage();
-    await page.setContent(mdToHtml(md), { waitUntil: 'load' });
+    await page.setContent(mdToHtml(normalizeFormalDocumentMarkdown(md)), { waitUntil: 'load' });
     await page.pdf({ path: fp, format: 'A4', printBackground: true, margin: { top: '18mm', bottom: '18mm', left: '16mm', right: '16mm' } });
   } finally {
     await browser.close();
@@ -183,6 +222,12 @@ function looksLikeGenericOfficeLedger(name: string, content: string): boolean {
   }
   return /(台账|清单|报表|登记表|明细表|跟踪表|excel|xlsx|表格)/i.test(text)
     && /(办公室|办公|商务|中铁|项目部|部门|责任人|归档|审批|状态|备注|日期|编号)/i.test(text);
+}
+
+function shouldUseDynamicOfficeWorkbook(name: string, content: string): boolean {
+  const text = `${name}\n${content}`.toLowerCase();
+  return /(采购|比价|报价|预算|测算|物资|材料|供应商|付款计划|成本)/.test(text)
+    && /(台账|清单|报表|登记表|明细表|统计表|汇总表|excel|xlsx|表格)/i.test(text);
 }
 
 function styleTitle(ws: any, range: string, title: string, subtitle: string, color = 'FF1F4E78'): void {
@@ -585,12 +630,123 @@ async function writeGenericOfficeLedgerTemplate(ExcelJS: any, fp: string): Promi
   await wb.xlsx.writeFile(fp);
 }
 
+function excelColumnLetter(index: number): string {
+  let n = index;
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+function normalizeDynamicHeaders(raw: string[]): string[] {
+  const seen = new Map<string, number>();
+  return raw.map((h, idx) => {
+    const base = (h || `字段${idx + 1}`).replace(/\s+/g, '').slice(0, 24) || `字段${idx + 1}`;
+    const count = (seen.get(base) || 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}${count}`;
+  });
+}
+
+function dynamicFieldGuide(header: string): string {
+  if (/编号|序号|编码/.test(header)) return '唯一编号，建议按项目/年份/流水号维护。';
+  if (/日期|时间/.test(header)) return '填写日期，统一使用 yyyy-mm-dd 格式，便于筛选和打印。';
+  if (/供应商|单位|公司/.test(header)) return '填写完整单位名称，避免简称导致后续对账困难。';
+  if (/金额|单价|总价|报价|预算|费用|成本/.test(header)) return '金额字段，按人民币元维护；同一张表内口径必须一致。';
+  if (/数量|工程量|面积|吨|米|件|套/.test(header)) return '数量字段，需与单位字段口径一致。';
+  if (/状态|进度/.test(header)) return '使用下拉状态维护，便于筛选待办、进行中和已完成项。';
+  if (/责任|经办|联系人/.test(header)) return '明确唯一责任人或经办人，便于闭环追踪。';
+  if (/备注|说明/.test(header)) return '填写补充说明、风险点或待确认事项。';
+  return '按实际业务口径填写，保持同列数据类型一致。';
+}
+
+function dynamicSampleValue(header: string, row: number): string | number | Date | null {
+  if (/编号|序号/.test(header)) return row;
+  if (/日期|时间/.test(header)) return new Date(row === 1 ? '2026-06-01' : '2026-06-05');
+  if (/供应商|单位|公司/.test(header)) return row === 1 ? '示例供应商A' : '示例供应商B';
+  if (/材料|物资|品名|名称|事项|项目/.test(header)) return row === 1 ? '示例材料/事项A' : '示例材料/事项B';
+  if (/数量|工程量|面积|吨|米|件|套/.test(header)) return row === 1 ? 100 : 80;
+  if (/单价|报价/.test(header)) return row === 1 ? 120 : 128;
+  if (/总价|金额|预算|费用|成本/.test(header)) return row === 1 ? 12000 : 10240;
+  if (/状态|进度/.test(header)) return row === 1 ? '待确认' : '已比价';
+  if (/责任|经办|联系人/.test(header)) return row === 1 ? '张三' : '李四';
+  if (/备注|说明/.test(header)) return '示例行，可删除';
+  return null;
+}
+
+async function writeDynamicOfficeTableWorkbook(ExcelJS: any, fp: string, name: string, table: string[][]): Promise<void> {
+  const headers = normalizeDynamicHeaders(table[0] || ['序号', '事项名称', '责任部门', '责任人', '状态', '备注']);
+  const dataRows = table.slice(1).filter((row) => row.some((cell) => String(cell || '').trim()));
+  while (dataRows.length < 2) dataRows.push(headers.map((header) => String(dynamicSampleValue(header, dataRows.length + 1) ?? '')));
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'AIOS';
+  wb.created = new Date();
+  wb.modified = new Date();
+  const main = wb.addWorksheet('业务明细');
+  const dict = wb.addWorksheet('字段说明');
+  const summary = wb.addWorksheet('统计看板');
+  applyWorksheetPrintDefaults(main);
+  applyWorksheetPrintDefaults(dict, '1:1');
+  applyWorksheetPrintDefaults(summary, '1:3');
+  main.views = [{ state: 'frozen', ySplit: 4 }];
+  main.properties.defaultRowHeight = 22;
+  const endCol = excelColumnLetter(headers.length);
+  styleTitle(main, `A1:${endCol}1`, name.replace(/\.[^.]+$/, ''), '按用户需求动态生成的可编辑业务表。字段来自本次任务内容，可继续增删改。', 'FF2F5597');
+  main.getRow(4).values = headers;
+  styleHeader(main.getRow(4), 'FF2F5597');
+  dataRows.forEach((row, idx) => {
+    main.getRow(5 + idx).values = headers.map((_, colIdx) => row[colIdx] ?? '');
+  });
+  for (let r = 5 + dataRows.length; r <= 64; r += 1) {
+    main.getCell(`A${r}`).value = r - 4;
+  }
+  main.addTable({
+    name: '业务明细',
+    ref: 'A4',
+    headerRow: true,
+    totalsRow: false,
+    style: { theme: 'TableStyleMedium9', showRowStripes: true },
+    columns: headers.map((header) => ({ name: header, filterButton: true })),
+    rows: Array.from({ length: 60 }, (_, idx) => {
+      const row = main.getRow(5 + idx).values as any[];
+      return headers.map((_, colIdx) => row[colIdx + 1] ?? null);
+    }),
+  });
+  headers.forEach((header, idx) => {
+    const col = main.getColumn(idx + 1);
+    col.width = Math.max(10, Math.min(28, Math.max(header.length + 6, ...dataRows.map((row) => String(row[idx] || '').length + 4))));
+    if (/日期|时间/.test(header)) col.numFmt = 'yyyy-mm-dd';
+    if (/金额|单价|总价|报价|预算|费用|成本/.test(header)) col.numFmt = '#,##0.00';
+    if (/完成率|比例|占比/.test(header)) col.numFmt = '0%';
+    const letter = excelColumnLetter(idx + 1);
+    for (let r = 5; r <= 64; r += 1) {
+      if (/状态|进度/.test(header)) main.getCell(`${letter}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: ['"未开始,待确认,已比价,审批中,进行中,已完成,暂停"'] };
+      if (/优先级|风险/.test(header)) main.getCell(`${letter}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: ['"高,中,低"'] };
+      if (/是否/.test(header)) main.getCell(`${letter}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: ['"是,否"'] };
+      main.getCell(`${letter}${r}`).alignment = { vertical: 'top', wrapText: true };
+    }
+  });
+  styleDictionary(dict, [['字段', '填写说明'], ...headers.map((header) => [header, dynamicFieldGuide(header)])]);
+  addSummarySheet(summary, '业务明细统计看板', [
+    ['字段数量', headers.length],
+    ['当前数据行', dataRows.length],
+    ['可维护预留行', 60],
+    ['可筛选字段', headers.length],
+  ]);
+  await wb.xlsx.writeFile(fp);
+}
+
 /** md → xlsx:表格成工作表;合同台账类需求走专用模板;无表格则整段按行 */
 async function toXlsx(content: string, fp: string, name: string): Promise<void> {
   ensureInstalled('exceljs');
   const m = 'exceljs';
   const mod = (await import(m)) as any;
   const ExcelJS = mod.default || mod;
+  const tables = extractMdTables(content);
   if (looksLikeExpenseLedger(name, content)) {
     await writeExpenseLedgerTemplate(ExcelJS, fp);
     return;
@@ -603,12 +759,15 @@ async function toXlsx(content: string, fp: string, name: string): Promise<void> 
     await writeContractLedgerTemplate(ExcelJS, fp);
     return;
   }
+  if (shouldUseDynamicOfficeWorkbook(name, content) && tables.length) {
+    await writeDynamicOfficeTableWorkbook(ExcelJS, fp, name, tables[0]!);
+    return;
+  }
   if (looksLikeGenericOfficeLedger(name, content)) {
     await writeGenericOfficeLedgerTemplate(ExcelJS, fp);
     return;
   }
   const wb = new ExcelJS.Workbook();
-  const tables = extractMdTables(content);
   if (!tables.length) {
     const ws = wb.addWorksheet('内容');
     applyWorksheetPrintDefaults(ws, '1:1');
@@ -641,6 +800,48 @@ async function toXlsx(content: string, fp: string, name: string): Promise<void> 
 }
 
 /** md → pptx:按标题分页(自动补 pptxgenjs) */
+function normalizePptMarkdown(md: string): string {
+  const raw = md.trim();
+  const parts = raw.split(/\n(?=#{1,3}\s)/).filter((p) => p.trim());
+  if (parts.length >= 3 && /目录|重点|问题|风险|计划|下一步|结论|汇报逻辑/.test(raw)) return raw;
+
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s*/, '').replace(/^#{1,6}\s*/, ''));
+  if (!lines.length) return raw;
+  const title = lines.shift() || '商务汇报';
+  const buckets: Record<'summary' | 'risk' | 'next' | 'support', string[]> = {
+    summary: [],
+    risk: [],
+    next: [],
+    support: [],
+  };
+  for (const line of lines) {
+    if (/问题|风险|不足|滞后|缺口|困难|待协调|需协调|异常/.test(line)) buckets.risk.push(line);
+    else if (/下一步|计划|下月|后续|推进|完成|落实|优化|安排|建议/.test(line)) buckets.next.push(line);
+    else if (/数据|依据|来源|支撑|附件|口径|说明|背景/.test(line)) buckets.support.push(line);
+    else buckets.summary.push(line);
+  }
+  const sections: Array<[string, string[]]> = [
+    ['重点结论', buckets.summary],
+    ['问题与风险', buckets.risk],
+    ['下一步安排', buckets.next],
+    ['支撑材料', buckets.support],
+  ].filter(([, items]) => items.length);
+  if (sections.length < 2) return raw;
+  return [
+    `# ${title}`,
+    '',
+    ...sections.flatMap(([name, items], idx) => [
+      `## 第${idx + 1}页: ${name}`,
+      ...items.slice(0, 10).map((item) => `- ${item}`),
+      '',
+    ]),
+  ].join('\n').trim();
+}
+
 async function toPptx(md: string, fp: string): Promise<void> {
   ensureInstalled('pptxgenjs');
   const m = 'pptxgenjs';
@@ -657,7 +858,8 @@ async function toPptx(md: string, fp: string): Promise<void> {
     bodyFontFace: 'Microsoft YaHei',
     lang: 'zh-CN',
   };
-  const parts = md.split(/\n(?=#{1,3}\s)/).filter((p) => p.trim());
+  const normalized = normalizePptMarkdown(md);
+  const parts = normalized.split(/\n(?=#{1,3}\s)/).filter((p) => p.trim());
   const chunks = parts.length ? parts : [md];
   const slideTitles = chunks.map((p, idx) => {
     const line = p.split('\n').find((l) => /^#{1,3}\s/.test(l));

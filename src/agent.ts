@@ -31,6 +31,38 @@ async function completeHtml(provider: Provider, model: string, system: string, o
   return out;
 }
 
+function officeExecutionInstruction(sub: SubTask): string {
+  const ext = (sub.outFile?.split('.').pop() || '').toLowerCase();
+  if (ext === 'xlsx') {
+    return [
+      '',
+      '【Excel 输出硬规则】',
+      '- 必须输出一张 Markdown 表格,不要只写说明文字。',
+      '- 表头必须贴合本次 prompt 的真实业务字段,不要套固定模板;例如采购比价要有供应商报价/交期/推荐理由,合同台账要有金额/履约/付款/归档。',
+      '- 表格至少 8 个字段、2 行样例数据;字段名要可直接变成 Excel 列名。',
+      '- 可在表格后补充简短字段说明,但表格必须先出现。',
+    ].join('\n');
+  }
+  if (ext === 'pptx') {
+    return [
+      '',
+      '【PPT 输出硬规则】',
+      '- 必须按幻灯片分页输出,用 "## 第N页: 标题" 标识每页。',
+      '- 每页只放一个主要观点,包含重点结论、问题风险、下一步安排等真实汇报逻辑。',
+      '- 禁止把整篇长文堆成一页。',
+    ].join('\n');
+  }
+  if (ext === 'docx' || ext === 'pdf') {
+    return [
+      '',
+      '【Word/PDF 输出硬规则】',
+      '- 必须输出正式材料结构:标题、执行摘要/结论、正文分节、表格或行动清单、风险与下一步。',
+      '- 禁止只写提纲、占位语或“已完成”。',
+    ].join('\n');
+  }
+  return '';
+}
+
 export async function runAgent(
   sub: SubTask,
   goal: string,
@@ -52,6 +84,7 @@ export async function runAgent(
     : '';
   const fresh = freshnessInstruction(goal);
   const evidenceText = await freshnessObservationContext(goal);
+  const officeInstruction = officeExecutionInstruction(sub);
 
   const base = {
     system: skill.system,
@@ -59,6 +92,7 @@ export async function runAgent(
       `整体目标:${goal}\n\n` +
       `你这一环的任务:${sub.objective}${boundary}${depContext}\n\n` +
       (evidenceText ? `${evidenceText}\n\n` : '') +
+      officeInstruction +
       fresh +
       `请直接产出这部分成果(markdown,聚焦本环)。` +
       `只给成品内容本身,不要任何开场白、寒暄、自我介绍或"好的"之类的过渡话,也不要重复任务标题。`,

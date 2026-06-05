@@ -2,45 +2,11 @@
 import { llm, CONFIG } from './config';
 import { SKILLS, SKILL_CATALOG } from './skills';
 import { needsFreshnessEvidence } from './freshness';
+import { defaultOutFileForFormat, officeFormatsFromGoal } from './office-format';
 import type { Plan, SubTask, SkillName } from './types';
 
 // 动态从 Skill 库取,以后加 Skill 不用改这里
 const VALID = Object.keys(SKILLS) as SkillName[];
-
-function officeFormatsFromGoal(goal: string): string[] {
-  const match = goal.match(/"formats"\s*:\s*\[([\s\S]*?)\]/);
-  if (match) {
-    const formats = [...match[1]!.matchAll(/"([a-z0-9]+)"/gi)]
-      .map((m) => m[1]!.toLowerCase())
-      .filter((ext) => ['docx', 'pdf', 'xlsx', 'pptx', 'md'].includes(ext));
-    return [...new Set(formats)];
-  }
-  const compact = goal.toLowerCase().replace(/\s+/g, '');
-  const formats: string[] = [];
-  if (/pptx?|powerpoint|幻灯片|演示/.test(compact)) formats.push('pptx');
-  if (/excel|xlsx|表格|台账|清单|报表/.test(compact)) formats.push('xlsx');
-  if (/word|docx/.test(compact)) formats.push('docx');
-  if (/pdf/.test(compact)) formats.push('pdf');
-  return [...new Set(formats)];
-}
-
-function defaultOutFileForFormat(goal: string, ext: string): string {
-  const compact = goal.replace(/\s+/g, '');
-  const base = /报销|费用|发票|票据/i.test(compact)
-    ? '费用报销台账模板'
-    : /会议|纪要|督办|待办|闭环/i.test(compact)
-      ? '会议事项跟踪清单'
-      : /合同/i.test(compact)
-        ? '合同台账模板'
-        : /台账|excel|xlsx|表格|清单|报表/i.test(compact)
-          ? '办公台账模板'
-    : /ppt|pptx|汇报|演示/i.test(goal)
-      ? '汇报材料'
-      : /报告|调研|研究/i.test(goal)
-        ? '调研报告'
-        : 'AIOS交付物';
-  return `${base}.${ext}`;
-}
 
 export async function plan(goal: string, memory: string = ''): Promise<Plan> {
   const system =
@@ -134,6 +100,7 @@ outFile 规则:【同一份成果的所有章节子任务必须用同一个 outF
       sub.objective += `\n本任务必须产出 ${officeFormats.map((f) => `.${f}`).join('/')} 可编辑文件,禁止输出 HTML artifact 冒充办公文件。`;
       if (primary === 'xlsx') {
         sub.objective += '\nExcel 必须按办公室可长期维护的台账/清单设计:字段说明、下拉校验、公式列、统计看板、冻结表头、打印设置都要考虑。';
+        sub.objective += '\n关键要求:你的输出必须包含一张 Markdown 表格,第一行是本任务专属字段,第二行是分隔线,后面给 2-3 行真实业务样例;不要只写字段说明或空泛描述。';
       } else if (primary === 'pptx') {
         sub.objective += '\nPPT 必须按正式办公室汇报设计:封面、目录、重点结论、问题风险、下一步安排,一页一观点,避免长段堆砌。';
       } else if (primary === 'docx' || primary === 'pdf') {
