@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { assemble } from '../src/result';
 import { pdfBrowserCandidates } from '../src/build';
-import type { AgentResult, Plan } from '../src/types';
+import type { AgentResult, AiosEvent, Plan } from '../src/types';
 
 test('office Excel delivery writes xlsx instead of html artifact', async () => {
   const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-format-'));
@@ -40,7 +40,8 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
         '| HT-001 | 示例合同 | 示例供应商 | 10000 | 2026-06-04 | 履约中 | 2026-12-31 | 办公室 | 示例 |',
       ].join('\n'),
     }];
-    const d = await assemble(plan, results, 1, outDir);
+    const events: AiosEvent[] = [];
+    const d = await assemble(plan, results, 1, outDir, (e) => events.push(e));
     assert.ok(d.dir, 'should create project directory');
     assert.ok(d.files?.some((f) => f.name.endsWith('.xlsx')), JSON.stringify(d.files));
     assert.ok(!d.artifactPath, 'office Excel must not be returned as html artifact');
@@ -75,6 +76,11 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     assert.ok(selfEntry, JSON.stringify(manifest.files));
     assert.equal(selfEntry.role, 'manifest');
     assert.equal(selfEntry.self_hash_excluded, true);
+    const steps = events.filter((e): e is Extract<AiosEvent, { type: 'result.step' }> => e.type === 'result.step');
+    assert.ok(steps.some((e) => e.stage === 'write' && /Writing editable deliverable/.test(e.message) && e.detail === '合同台账模板.xlsx'));
+    assert.ok(steps.some((e) => e.stage === 'quality' && /Office quality verified/.test(e.message)));
+    assert.ok(steps.some((e) => e.stage === 'smoke' && e.detail === 'pass'));
+    assert.ok(steps.some((e) => e.stage === 'write' && e.detail === 'delivery_manifest.json'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

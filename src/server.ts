@@ -105,6 +105,8 @@ const server = createServer(async (req, res) => {
           sources_path: d.sources_path,
           data_path: d.data_path,
           evidence_manifest: d.evidence_manifest,
+          office_quality_manifest: d.office_quality_manifest,
+          delivery_manifest: d.delivery_manifest,
         }));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });

@@ -38,6 +38,11 @@ function printer(e: AiosEvent): void {
     case 'result.start':
       console.log(`${C.purple}Result Engine${C.reset} ${C.dim}汇总交付…${C.reset}`);
       break;
+    case 'result.step':
+      console.log(
+        `  ${e.ok === false ? C.yellow : C.dim}${e.ok === false ? '!' : '▸'} ${e.message}${e.detail ? ` · ${e.detail}` : ''}${C.reset}`,
+      );
+      break;
     case 'result.done':
       break;
   }

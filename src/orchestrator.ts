@@ -39,7 +39,7 @@ export async function run(
   const results = p.subtasks.map((s) => done.get(s.id)!);
 
   emit({ type: 'result.start' });
-  const deliverable = await assemble(p, results, Date.now() - t0, outDir);
+  const deliverable = await assemble(p, results, Date.now() - t0, outDir, emit);
   emit({ type: 'result.done', deliverable });
 
   await remember(goal, p.kind).catch(() => {}); // 记录任务 + 提炼偏好(确保写入,CLI 短进程才不丢)

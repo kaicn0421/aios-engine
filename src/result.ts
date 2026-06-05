@@ -7,7 +7,7 @@ import { llm, CONFIG } from './config';
 import { extractHtml, writeArtifact, sanitizeName, writeDeliverable } from './build';
 import { buildFreshnessArtifacts, type FreshnessSummary } from './freshness';
 import { buildOfficeQualityArtifacts, isOfficeDelivery } from './office-quality';
-import type { AgentResult, Deliverable, Plan } from './types';
+import type { AgentResult, Deliverable, EventSink, Plan } from './types';
 
 function officeFormatsFromGoal(goal: string): string[] {
   const match = goal.match(/"formats"\s*:\s*\[([\s\S]*?)\]/);
@@ -226,7 +226,13 @@ function freshnessRepairReport(goal: string, understanding: string, summary: Fre
   ].join('\n');
 }
 
-export async function assemble(plan: Plan, results: AgentResult[], ms: number, outDir: string): Promise<Deliverable> {
+export async function assemble(
+  plan: Plan,
+  results: AgentResult[],
+  ms: number,
+  outDir: string,
+  emit: EventSink = () => {},
+): Promise<Deliverable> {
   const requiredFormats = officeFormatsFromGoal(plan.goal);
   // artifact:把 code Agent 的产出落地成可运行的单文件成品
   if (plan.kind === 'artifact' && requiredFormats.length === 0) {
@@ -258,8 +264,16 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
     const dir = join(outDir, `aios-${Date.now()}`);
     mkdirSync(dir, { recursive: true });
     const files: Array<{ name: string; path: string }> = [];
+    emit({ type: 'result.step', stage: 'freshness', message: 'Checking freshness evidence' });
     const freshness = await buildFreshnessArtifacts(plan.goal, ok, dir);
     const freshnessFailed = freshness.freshness_summary && !freshness.freshness_verified;
+    emit({
+      type: 'result.step',
+      stage: 'freshness',
+      message: freshness.freshness_summary ? 'Freshness evidence checked' : 'No freshness check required',
+      detail: freshness.freshness_verified ? 'verified' : freshness.freshness_summary ? 'repair_required' : 'not_required',
+      ok: freshness.freshness_verified || !freshness.freshness_summary,
+    });
     const sum = freshnessFailed
       ? freshnessRepairSummary(plan.goal, freshness.freshness_summary!)
       : await execSummary(plan.goal, ok);
@@ -275,12 +289,14 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
     }
     for (const [name, parts] of groups) {
       const content = parts.join('\n\n');
+      emit({ type: 'result.step', stage: 'write', message: 'Writing editable deliverable', detail: name });
       const fp = await writeDeliverable(content, name, dir);
       files.push({ name, path: fp });
       for (const ext of requiredFormats) {
         if (ext === extOf(name)) continue;
         const extraName = sanitizeName(`${withoutExt(name)}.${ext}`);
         if (files.some((f) => f.name === extraName)) continue;
+        emit({ type: 'result.step', stage: 'write', message: 'Writing requested companion format', detail: extraName });
         const extraPath = await writeDeliverable(content, extraName, dir);
         files.push({ name: extraName, path: extraPath });
       }
@@ -299,12 +315,25 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
         '',
       ]),
     ].join('\n');
+    emit({ type: 'result.step', stage: 'write', message: 'Writing source content', detail: 'source_content.md' });
     const sourceContentPath = join(dir, 'source_content.md');
     writeFileSync(sourceContentPath, sourceContent, 'utf8');
     files.push({ name: 'source_content.md', path: sourceContentPath });
+    if (isOfficeDelivery(files)) {
+      emit({ type: 'result.step', stage: 'quality', message: 'Verifying Office delivery quality' });
+    }
     const quality = isOfficeDelivery(files)
       ? await buildOfficeQualityArtifacts(plan.goal, files, dir, freshness.freshness_verified)
       : undefined;
+    if (quality) {
+      emit({
+        type: 'result.step',
+        stage: 'quality',
+        message: 'Office quality verified',
+        detail: `${quality.manifest.status}:${quality.manifest.score}`,
+        ok: quality.manifest.status === 'pass',
+      });
+    }
     if (quality) files.push(...quality.files);
     const primary = primaryFileName(files, requiredFormats);
     const deliveryManifestPath = join(dir, 'delivery_manifest.json');
@@ -325,6 +354,14 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
     writeFileSync(deliveryManifestPath, '', 'utf8');
     const manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
     const smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
+    emit({
+      type: 'result.step',
+      stage: 'smoke',
+      message: 'Smoke checking deliverable files',
+      detail: smoke.status,
+      ok: smoke.status !== 'fail',
+    });
+    emit({ type: 'result.step', stage: 'write', message: 'Writing delivery manifest', detail: 'delivery_manifest.json' });
     writeFileSync(deliveryManifestPath, JSON.stringify({
       schema: 'aios.delivery_manifest.v1',
       generated_at: new Date().toISOString(),

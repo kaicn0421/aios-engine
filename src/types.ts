@@ -78,6 +78,7 @@ export type AiosEvent =
   | { type: 'agent.start'; subtask: SubTask }
   | { type: 'agent.done'; result: AgentResult }
   | { type: 'result.start' }
+  | { type: 'result.step'; stage: string; message: string; detail?: string; ok?: boolean }
   | { type: 'result.done'; deliverable: Deliverable };
 
 export type EventSink = (e: AiosEvent) => void;
