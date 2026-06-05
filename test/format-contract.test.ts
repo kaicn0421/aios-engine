@@ -47,11 +47,21 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     const readme = readFileSync(join(d.dir!, 'README.md'), 'utf8');
     assert.match(readme, /优先打开: 合同台账模板\.xlsx/);
     assert.match(readme, /office_quality_manifest\.json/);
+    assert.match(readme, /source_content\.md/);
+    assert.match(readme, /delivery_manifest\.json/);
     assert.ok(d.office_quality_manifest, 'office delivery should write a quality manifest');
     const quality = JSON.parse(readFileSync(d.office_quality_manifest!, 'utf8'));
     assert.equal(quality.schema, 'aios.office_quality_manifest.v1');
     assert.equal(quality.status, 'pass');
     assert.ok(quality.rules.some((r: string) => /OB|正式交付|Office|Excel|PDF/.test(r)));
+    assert.ok(d.delivery_manifest, 'office delivery should write a delivery manifest');
+    const manifest = JSON.parse(readFileSync(d.delivery_manifest!, 'utf8'));
+    assert.equal(manifest.schema, 'aios.delivery_manifest.v1');
+    assert.equal(manifest.primary, '合同台账模板.xlsx');
+    assert.equal(manifest.source_content, 'source_content.md');
+    assert.equal(manifest.office_quality.status, 'pass');
+    assert.ok(manifest.files.some((f: any) => f.name === 'source_content.md'));
+    assert.ok(manifest.files.some((f: any) => f.name === 'delivery_manifest.json'));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

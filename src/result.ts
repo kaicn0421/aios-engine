@@ -181,22 +181,66 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
         files.push({ name: extraName, path: extraPath });
       }
     }
+    const sourceContent = [
+      `# ${plan.goal}`,
+      '',
+      `> ${plan.understanding}`,
+      '',
+      '## Source Content',
+      '',
+      ...[...groups.entries()].flatMap(([name, parts]) => [
+        `### ${name}`,
+        '',
+        parts.join('\n\n'),
+        '',
+      ]),
+    ].join('\n');
+    const sourceContentPath = join(dir, 'source_content.md');
+    writeFileSync(sourceContentPath, sourceContent, 'utf8');
+    files.push({ name: 'source_content.md', path: sourceContentPath });
     const quality = isOfficeDelivery(files)
       ? await buildOfficeQualityArtifacts(plan.goal, files, dir, freshness.freshness_verified)
       : undefined;
     if (quality) files.push(...quality.files);
     const primary = primaryFileName(files, requiredFormats);
+    const deliveryManifestPath = join(dir, 'delivery_manifest.json');
+    const filesForReadme = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
     const readme =
       `# ${plan.goal}\n\n> ${plan.understanding}\n\n## 使用说明\n\n` +
       `- 优先打开: ${primary}\n` +
       `- 源文件可继续编辑;若包含 PDF,PDF 适合发送/打印,源文件适合修改复用。\n` +
+      `- 需要继续修改内容时,可先看 source_content.md;需要机器可读交付清单时,看 delivery_manifest.json。\n` +
       `- 若数据/价格/行情类交付被标记为需修复,请先看 freshness_summary / sources / data 底稿。\n\n` +
       (quality ? `## 质量验收\n\n- 质量分: ${quality.manifest.score}\n- 状态: ${quality.manifest.status}\n- 详见: office_quality_manifest.json / OFFICE_DELIVERY_CHECKLIST.md\n\n` : '') +
       `## 执行摘要\n\n${sum}\n\n## 交付文件\n` +
-      files.map((f) => `- ${f.name}`).join('\n') + '\n';
+      filesForReadme.map((f) => `- ${f.name}`).join('\n') + '\n';
     const readmePath = join(dir, 'README.md');
     writeFileSync(readmePath, readme, 'utf8');
     files.unshift({ name: 'README.md', path: readmePath });
+    const finalFiles = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
+    writeFileSync(deliveryManifestPath, JSON.stringify({
+      schema: 'aios.delivery_manifest.v1',
+      generated_at: new Date().toISOString(),
+      goal: plan.goal,
+      understanding: plan.understanding,
+      primary,
+      required_formats: requiredFormats,
+      source_content: 'source_content.md',
+      freshness: {
+        verified: freshness.freshness_verified,
+        summary_path: freshness.freshness_summary ? 'freshness_summary.json' : null,
+        sources_path: freshness.sources_path ? 'sources.jsonl' : null,
+        data_path: freshness.data_path ? 'data.csv' : null,
+      },
+      office_quality: quality ? {
+        score: quality.manifest.score,
+        status: quality.manifest.status,
+        manifest_path: 'office_quality_manifest.json',
+        checklist_path: 'OFFICE_DELIVERY_CHECKLIST.md',
+      } : null,
+      files: finalFiles.map((f) => ({ name: f.name, path: f.path })),
+    }, null, 2), 'utf8');
+    files.push({ name: 'delivery_manifest.json', path: deliveryManifestPath });
     return {
       goal: plan.goal,
       understanding: plan.understanding,
@@ -211,6 +255,7 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
       data_path: freshness.data_path,
       evidence_manifest: freshness.evidence_manifest,
       office_quality_manifest: quality ? join(dir, 'office_quality_manifest.json') : undefined,
+      delivery_manifest: deliveryManifestPath,
     };
   }
 

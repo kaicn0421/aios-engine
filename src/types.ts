@@ -48,6 +48,7 @@ export interface Deliverable {
   data_path?: string;           // data.csv/xlsx 路径
   evidence_manifest?: string;   // evidence_manifest.json 路径
   office_quality_manifest?: string; // office_quality_manifest.json 路径
+  delivery_manifest?: string;   // delivery_manifest.json 路径
 }
 
 /** Skill 名 */
