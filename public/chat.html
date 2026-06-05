@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AIOS — 从一句话,到结果</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root{--bg:#07070a;--ink:#f0f0f4;--ink2:rgba(240,240,244,.58);--ink3:rgba(240,240,244,.34);
+    --line:rgba(255,255,255,.08);--line2:rgba(255,255,255,.14);--accent:#8b7bf5;--accent2:#a99bff;
+    --mono:"Geist Mono","SF Mono",ui-monospace,Menlo,monospace;
+    --sans:"Hanken Grotesk","SF Pro Display",-apple-system,"PingFang SC",sans-serif;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;min-height:100vh;
+    background-image:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);
+    background-size:48px 48px;}
+  .wrap{max-width:860px;margin:0 auto;padding:40px 22px 90px;}
+  .top{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+  .logo{font-size:22px;font-weight:800;letter-spacing:.5px;}
+  .kick{font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--ink3);}
+  h1{font-size:clamp(26px,4vw,40px);font-weight:800;letter-spacing:-.03em;margin:14px 0 6px;line-height:1.05;}
+  h1 .g{background:linear-gradient(100deg,#fff 30%,var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .sub{color:var(--ink2);font-size:15px;margin-bottom:28px;}
+  .box{border:1px solid var(--line2);border-radius:14px;background:rgba(255,255,255,.03);padding:16px;backdrop-filter:blur(10px);}
+  textarea{width:100%;background:transparent;border:none;color:var(--ink);font-family:var(--sans);font-size:16px;resize:none;outline:none;line-height:1.5;}
+  textarea::placeholder{color:var(--ink3);}
+  .barrow{display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:10px;flex-wrap:wrap;}
+  .examples{display:flex;gap:7px;flex-wrap:wrap;}
+  .ex{font-size:12px;font-family:var(--mono);color:var(--ink2);border:1px solid var(--line);border-radius:7px;padding:5px 9px;cursor:pointer;transition:.2s;}
+  .ex:hover{color:var(--ink);border-color:var(--line2);}
+  .run{background:var(--accent);color:#fff;border:none;border-radius:10px;padding:11px 22px;font-size:15px;font-weight:600;cursor:pointer;font-family:var(--sans);transition:.2s;}
+  .run:hover{background:var(--accent2);}.run:disabled{opacity:.5;cursor:not-allowed;}
+
+  /* 澄清问题卡 */
+  .clarify{margin-top:20px;display:none;border:1px solid rgba(139,123,245,.35);border-radius:14px;padding:20px;background:rgba(139,123,245,.06);}
+  .clarify.on{display:block;}
+  .ctitle{font-size:14px;color:var(--accent2);font-family:var(--mono);letter-spacing:.5px;margin-bottom:4px;}
+  .chint{font-size:12px;color:var(--ink3);margin-bottom:16px;}
+  .cq{margin-bottom:14px;}
+  .cq label{display:block;font-size:14px;color:var(--ink);margin-bottom:6px;}
+  .cq input{width:100%;background:rgba(0,0,0,.28);border:1px solid var(--line2);border-radius:8px;padding:9px 11px;color:var(--ink);font-size:13.5px;font-family:var(--sans);outline:none;}
+  .cq input:focus{border-color:var(--accent);}
+  .crow{display:flex;gap:10px;margin-top:6px;}
+  .cskip{background:transparent;border:1px solid var(--line2);color:var(--ink2);border-radius:10px;padding:11px 18px;font-size:14px;cursor:pointer;font-family:var(--sans);transition:.2s;}
+  .cskip:hover{color:var(--ink);border-color:var(--ink3);}
+
+  .stream{margin-top:26px;display:none;}.stream.on{display:block;}
+  .understanding{color:var(--ink2);font-size:14.5px;border-left:2px solid var(--accent);padding-left:12px;margin-bottom:18px;}
+  .tasks{display:flex;flex-direction:column;gap:8px;}
+  .task{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:rgba(255,255,255,.015);transition:.3s;}
+  .task.running{border-color:rgba(139,123,245,.45);background:rgba(139,123,245,.08);}
+  .task.done{border-color:var(--line2);}
+  .task .ic{width:16px;flex:none;text-align:center;font-size:13px;}
+  .task.pending .ic{color:var(--ink3);}
+  .task.running .ic{color:var(--accent2);animation:spin 1s linear infinite;}
+  .task.done .ic{color:#5ad27e;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .task .sk{font-family:var(--mono);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--ink3);border:1px solid var(--line);border-radius:5px;padding:2px 7px;flex:none;}
+  .task .ti{font-size:14.5px;font-weight:500;}
+  .task .ms{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3);}
+  .phase{font-family:var(--mono);font-size:12px;color:var(--accent2);letter-spacing:1px;margin:18px 0 12px;display:flex;align-items:center;gap:8px;}
+  .phase::before{content:"";width:6px;height:6px;border-radius:99px;background:var(--accent2);box-shadow:0 0 8px var(--accent2);}
+
+  .result{margin-top:26px;border-top:1px solid var(--line);padding-top:8px;display:none;}.result.on{display:block;}
+  .result h1{font-size:25px;margin:20px 0 10px;}
+  .result h2{font-size:19px;margin:24px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px;}
+  .result h3{font-size:16px;margin:16px 0 8px;}
+  .result p{margin:9px 0;color:var(--ink2);}
+  .result ul,.result ol{margin:9px 0 9px 22px;color:var(--ink2);}.result li{margin:4px 0;}
+  .result table{border-collapse:collapse;margin:12px 0;font-size:13px;width:100%;}
+  .result th,.result td{border:1px solid var(--line2);padding:7px 10px;text-align:left;}
+  .result th{background:rgba(255,255,255,.04);}
+  .result blockquote{border-left:2px solid var(--accent);padding-left:12px;color:var(--ink3);margin:10px 0;}
+  .result code{font-family:var(--mono);background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px;font-size:.9em;}
+  .result strong{color:var(--ink);}
+  .result hr{border:none;border-top:1px solid var(--line);margin:22px 0;}
+
+  /* 成品(artifact)展示 */
+  .ahead{display:flex;align-items:center;gap:10px;margin:6px 0 14px;font-weight:600;color:#5ad27e;font-size:15px;flex-wrap:wrap;}
+  .abtn{font-size:12px;font-family:var(--mono);color:var(--ink2);border:1px solid var(--line2);border-radius:7px;padding:5px 11px;transition:.2s;}
+  .abtn:hover{color:var(--ink);border-color:var(--accent);}
+  .aframe{width:100%;height:620px;border:1px solid var(--line2);border-radius:12px;background:#000;}
+  .filelist{display:flex;flex-direction:column;gap:8px;margin:12px 0;}
+  .fileitem{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line2);border-radius:9px;padding:11px 14px;transition:.2s;}
+  .fileitem:hover{border-color:var(--accent);background:rgba(139,123,245,.06);}
+  .fileitem .fn{font-size:14px;color:var(--ink);}
+  .fileitem .fview{font-family:var(--mono);font-size:11px;color:var(--accent2);}
+  .rd{margin-top:14px;}
+  .err{color:#ff8585;font-size:14px;margin-top:14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><span class="logo">AIOS</span><span class="kick">AI Agent Operation System</span></div>
+  <h1>从一句话,<span class="g">到结果。</span></h1>
+  <p class="sub">说出你想完成什么,AIOS 自动拆解任务、调度 Agent、交付完整结果。</p>
+
+  <div class="box">
+    <textarea id="goal" rows="2" placeholder="例如:帮我做一个贪吃蛇游戏 / 写一篇最低工资影响就业的论文"></textarea>
+    <div class="barrow">
+      <div class="examples">
+        <span class="ex">帮我做一个贪吃蛇小游戏</span>
+        <span class="ex">帮我做一份泰国麻辣烫开店方案</span>
+        <span class="ex">写一篇关于最低工资影响就业的论文</span>
+      </div>
+      <button class="run" id="run">运行 →</button>
+    </div>
+  </div>
+
+  <div class="clarify" id="clarify"></div>
+
+  <div class="stream" id="stream">
+    <div class="understanding" id="understanding"></div>
+    <div class="phase" id="phase">AIOS Brain 理解目标…</div>
+    <div class="tasks" id="tasks"></div>
+  </div>
+
+  <div class="result" id="result"></div>
+  <div class="err" id="err"></div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const skillLabel = { research:'调研', analysis:'分析', writing:'写作', planning:'规划', finance:'财务', deck:'PPT', data:'数据', marketing:'营销', code:'造物' };
+  let es = null;
+  const esc = (s) => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+
+  document.querySelectorAll('.ex').forEach((e) => e.onclick = () => { $('goal').value = e.textContent; });
+
+  function reset(){
+    if(es) es.close();
+    $('clarify').className = 'clarify'; $('clarify').innerHTML = '';
+    $('stream').className = 'stream'; $('understanding').textContent = ''; $('tasks').innerHTML = '';
+    $('result').className = 'result'; $('result').innerHTML = '';
+    $('err').textContent = '';
+  }
+
+  // 第一步:先澄清
+  $('run').onclick = () => {
+    const goal = $('goal').value.trim();
+    if(!goal) return;
+    reset();
+    $('run').disabled = true;
+    $('clarify').className = 'clarify on';
+    $('clarify').innerHTML = '<div class="chint">AIOS 正在理解需求…</div>';
+    fetch('/api/clarify?goal=' + encodeURIComponent(goal))
+      .then((r) => r.json())
+      .then((c) => {
+        if(c.clear || !c.questions || !c.questions.length){ runGoal(goal); }
+        else { showClarify(goal, c.questions); }
+      })
+      .catch(() => runGoal(goal));
+  };
+
+  // 显示澄清问题卡(各带默认值,可直接继续)
+  function showClarify(goal, qs){
+    $('run').disabled = false;
+    let html = '<div class="ctitle">先确认几个细节</div><div class="chint">已填好合理默认值,改不改都行——直接「继续」就用默认。</div>';
+    qs.forEach((q, i) => {
+      html += '<div class="cq"><label>' + esc(q.q) + '</label><input data-ci="' + i + '" value="' + esc(q.suggestion) + '"/></div>';
+    });
+    html += '<div class="crow"><button class="run" id="cgo">用这些继续 →</button><button class="cskip" id="cskip">跳过,直接用默认</button></div>';
+    $('clarify').innerHTML = html;
+
+    const collect = () => {
+      const ans = qs.map((q, i) => {
+        const v = (document.querySelector('[data-ci="' + i + '"]').value || q.suggestion).trim();
+        return '- ' + q.q + ' ' + v;
+      }).join('\n');
+      $('clarify').className = 'clarify';
+      runGoal(goal + '\n\n【补充要求】\n' + ans);
+    };
+    $('cgo').onclick = collect;
+    $('cskip').onclick = collect;
+  }
+
+  // 第二步:跑引擎
+  function runGoal(goal){
+    if(es) es.close();
+    $('run').disabled = true;
+    $('clarify').className = 'clarify';
+    $('stream').className = 'stream on';
+    $('result').className = 'result'; $('result').innerHTML = '';
+    $('understanding').textContent = ''; $('tasks').innerHTML = '';
+    $('phase').textContent = 'AIOS Brain 理解目标…';
+
+    es = new EventSource('/api/run?goal=' + encodeURIComponent(goal));
+    es.onmessage = (m) => {
+      const e = JSON.parse(m.data);
+      if(e.type === 'brain.done'){
+        $('understanding').textContent = e.plan.understanding;
+        $('phase').textContent = '拆解为 ' + e.plan.subtasks.length + ' 个子任务,执行中…';
+        $('tasks').innerHTML = e.plan.subtasks.map((s) =>
+          '<div class="task pending" data-st="' + s.id + '"><span class="ic">·</span>' +
+          '<span class="sk">' + (skillLabel[s.skill] || s.skill) + '</span>' +
+          '<span class="ti">' + esc(s.title) + '</span><span class="ms"></span></div>').join('');
+      }
+      else if(e.type === 'agent.start'){ setTask(e.subtask.id, 'running'); }
+      else if(e.type === 'agent.done'){ setTask(e.result.subtaskId, 'done', e.result.ms); }
+      else if(e.type === 'result.start'){ $('phase').textContent = 'Result Engine 汇总交付…'; }
+      else if(e.type === 'result.done'){
+        const d = e.deliverable;
+        $('phase').textContent = '✓ 交付完成 (' + (d.ms/1000).toFixed(1) + 's)';
+        $('result').className = 'result on';
+        const toUrl = (p) => '/project/' + encodeURI((p.split('/output/')[1]) || '');
+        if(d.files && d.files.length){
+          const mainHtml = d.files.find((f) => f.name.endsWith('.html'));
+          let h = '<div class="ahead">✓ 已生成项目文件夹 · ' + d.files.length + ' 个文件</div>';
+          h += '<div class="filelist">' + d.files.map((f) =>
+            '<a class="fileitem" href="' + toUrl(f.path) + '" target="_blank"><span class="fn">' + f.name + '</span><span class="fview">查看 ↗</span></a>').join('') + '</div>';
+          h += mainHtml ? '<iframe class="aframe" src="' + toUrl(mainHtml.path) + '"></iframe>' : '<div class="rd">' + marked.parse(d.markdown) + '</div>';
+          $('result').innerHTML = h;
+        } else if(d.artifactPath){
+          const name = d.artifactPath.split('/').pop();
+          const u = '/artifact/' + name;
+          $('result').innerHTML =
+            '<div class="ahead">✓ 已生成可运行成品' +
+            '<a class="abtn" href="' + u + '" target="_blank">新窗口打开 ↗</a>' +
+            '<a class="abtn" href="' + u + '" download>下载 HTML</a></div>' +
+            '<iframe class="aframe" src="' + u + '"></iframe>';
+        } else {
+          $('result').innerHTML = marked.parse(d.markdown);
+        }
+      }
+      else if(e.type === 'error'){ $('err').textContent = 'AIOS 出错: ' + e.message; }
+    };
+    es.addEventListener('end', () => { es.close(); $('run').disabled = false; });
+    es.onerror = () => { if(es) es.close(); $('run').disabled = false; };
+  }
+
+  function setTask(id, state, ms){
+    const el = document.querySelector('[data-st="' + id + '"]');
+    if(!el) return;
+    el.className = 'task ' + state;
+    el.querySelector('.ic').textContent = state==='done' ? '✓' : (state==='running' ? '◐' : '·');
+    if(ms != null) el.querySelector('.ms').textContent = (ms/1000).toFixed(1) + 's';
+  }
+</script>
+</body></html>

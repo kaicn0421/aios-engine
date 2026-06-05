@@ -1,0 +1,29 @@
+{
+  "name": "aios-engine",
+  "version": "0.1.0",
+  "description": "AIOS — AI Agent Operation System. One sentence in, finished work out.",
+  "type": "module",
+  "scripts": {
+    "aios": "tsx src/cli.ts",
+    "chat": "tsx src/server.ts",
+    "app": "electron electron/main.cjs",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "html-to-docx": "^1.8.0",
+    "marked": "^18.0.4",
+    "openai": "^4.67.3",
+    "pptxgenjs": "^4.0.1",
+    "puppeteer": "^25.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "electron": "^42.3.0",
+    "esbuild": "^0.27.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+.env
+.DS_Store
+output/
+*.log
+memory.json
+.aios-key.json
+routing-history.jsonl
+dist/
+coverage/
+tmp/

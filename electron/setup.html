@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<title>激活 AIOS</title>
+<style>
+  *{box-sizing:border-box;}
+  body{background:#07070a;color:#f0f0f4;font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;
+    display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
+    background-image:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);background-size:46px 46px;}
+  .box{text-align:center;max-width:460px;padding:40px;}
+  .logo{font-size:30px;font-weight:800;letter-spacing:.5px;}
+  .kick{font-family:"SF Mono",monospace;font-size:11px;letter-spacing:2px;color:rgba(240,240,244,.34);text-transform:uppercase;margin-top:8px;}
+  h1{font-size:22px;margin:30px 0 8px;font-weight:700;}
+  p{color:rgba(240,240,244,.56);font-size:14px;margin:0 0 26px;line-height:1.65;}
+  input{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.14);border-radius:11px;
+    padding:14px 16px;color:#f0f0f4;font-size:15px;font-family:"SF Mono",monospace;outline:none;}
+  input:focus{border-color:#8b7bf5;}
+  button{margin-top:16px;width:100%;background:#8b7bf5;color:#fff;border:none;border-radius:11px;
+    padding:14px;font-size:15px;font-weight:600;cursor:pointer;transition:.2s;}
+  button:hover{background:#a99bff;}
+  .hint{margin-top:20px;font-size:12px;color:rgba(240,240,244,.34);}
+  a{color:#a99bff;cursor:pointer;}
+</style></head>
+<body>
+<div class="box">
+  <div class="logo">AIOS</div>
+  <div class="kick">AI Agent Operation System</div>
+  <h1>激活</h1>
+  <p>粘贴一条 API Key 即可激活,本地无限使用。<br/>Key 只存在你本机、不上传任何服务器。</p>
+  <input id="key" placeholder="sk-...  (DeepSeek API Key)" autofocus/>
+  <button id="go" onclick="activate()">激活 AIOS</button>
+  <div class="hint">没有 key? 去 <a id="link">platform.deepseek.com</a> 免费获取</div>
+</div>
+<script>
+  const { ipcRenderer } = require('electron');
+  document.getElementById('link').onclick = () => ipcRenderer.send('open-external', 'https://platform.deepseek.com');
+  function activate(){
+    const k = document.getElementById('key').value.trim();
+    if(k){ document.getElementById('go').textContent = '启动引擎中…'; ipcRenderer.send('activate', k); }
+  }
+  document.getElementById('key').addEventListener('keydown', (e) => { if(e.key === 'Enter') activate(); });
+</script>
+</body></html>
