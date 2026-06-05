@@ -59,9 +59,22 @@ test('office Excel delivery writes xlsx instead of html artifact', async () => {
     assert.equal(manifest.schema, 'aios.delivery_manifest.v1');
     assert.equal(manifest.primary, '合同台账模板.xlsx');
     assert.equal(manifest.source_content, 'source_content.md');
+    assert.equal(manifest.smoke.status, 'pass');
     assert.equal(manifest.office_quality.status, 'pass');
-    assert.ok(manifest.files.some((f: any) => f.name === 'source_content.md'));
-    assert.ok(manifest.files.some((f: any) => f.name === 'delivery_manifest.json'));
+    const primaryEntry = manifest.files.find((f: any) => f.name === '合同台账模板.xlsx');
+    assert.ok(primaryEntry, JSON.stringify(manifest.files));
+    assert.equal(primaryEntry.role, 'primary');
+    assert.ok(primaryEntry.bytes > 1000, JSON.stringify(primaryEntry));
+    assert.match(primaryEntry.sha256, /^[a-f0-9]{64}$/);
+    const sourceEntry = manifest.files.find((f: any) => f.name === 'source_content.md');
+    assert.ok(sourceEntry, JSON.stringify(manifest.files));
+    assert.equal(sourceEntry.role, 'source');
+    assert.ok(sourceEntry.bytes > 0, JSON.stringify(sourceEntry));
+    assert.match(sourceEntry.sha256, /^[a-f0-9]{64}$/);
+    const selfEntry = manifest.files.find((f: any) => f.name === 'delivery_manifest.json');
+    assert.ok(selfEntry, JSON.stringify(manifest.files));
+    assert.equal(selfEntry.role, 'manifest');
+    assert.equal(selfEntry.self_hash_excluded, true);
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

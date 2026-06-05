@@ -1,6 +1,7 @@
 // Result Engine —— 把多个 Agent 的产出整合成一份最终交付物。
 // 块3.5: 先调 LLM 生成全局"执行摘要",再拼接各部分 → 从"拼接"升级为"整合报告"。
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { llm, CONFIG } from './config';
 import { extractHtml, writeArtifact, sanitizeName, writeDeliverable } from './build';
@@ -57,6 +58,109 @@ function primaryFileName(files: Array<{ name: string; path: string }>, requiredF
     if (found) return found.name;
   }
   return files.find((f) => f.name !== 'README.md')?.name || 'README.md';
+}
+
+interface DeliveryManifestFile {
+  name: string;
+  path: string;
+  ext: string;
+  role: 'primary' | 'source' | 'readme' | 'quality' | 'evidence' | 'manifest' | 'support';
+  exists: boolean;
+  bytes: number;
+  sha256: string | null;
+  self_hash_excluded?: boolean;
+}
+
+function fileBytes(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function fileSha256(path: string): string {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
+function fileRole(name: string, primary: string): DeliveryManifestFile['role'] {
+  if (name === primary) return 'primary';
+  if (name === 'source_content.md') return 'source';
+  if (name === 'README.md') return 'readme';
+  if (name === 'delivery_manifest.json') return 'manifest';
+  if (name === 'office_quality_manifest.json' || name === 'OFFICE_DELIVERY_CHECKLIST.md') return 'quality';
+  if (['sources.jsonl', 'data.csv', 'freshness_summary.json', 'evidence_manifest.json'].includes(name)) return 'evidence';
+  return 'support';
+}
+
+function manifestFileEntry(file: { name: string; path: string }, primary: string, manifestPath: string): DeliveryManifestFile {
+  const role = fileRole(file.name, primary);
+  const isSelf = file.path === manifestPath;
+  return {
+    name: file.name,
+    path: file.path,
+    ext: extOf(file.name),
+    role,
+    exists: existsSync(file.path),
+    bytes: isSelf ? 0 : fileBytes(file.path),
+    sha256: isSelf ? null : fileSha256(file.path),
+    ...(isSelf ? { self_hash_excluded: true } : {}),
+  };
+}
+
+function deliverySmoke(
+  entries: DeliveryManifestFile[],
+  primary: string,
+  requiredFormats: string[],
+  quality: Awaited<ReturnType<typeof buildOfficeQualityArtifacts>> | undefined,
+  freshness: Awaited<ReturnType<typeof buildFreshnessArtifacts>>,
+) {
+  const primaryEntry = entries.find((f) => f.name === primary);
+  const sourceEntry = entries.find((f) => f.name === 'source_content.md');
+  const nonSelfEntries = entries.filter((f) => f.role !== 'manifest');
+  const checks = [
+    {
+      id: 'primary_exists',
+      ok: Boolean(primaryEntry?.exists && primaryEntry.bytes > 0 && /^[a-f0-9]{64}$/.test(primaryEntry.sha256 || '')),
+      detail: primary,
+    },
+    {
+      id: 'source_content_exists',
+      ok: Boolean(sourceEntry?.exists && sourceEntry.bytes > 0 && /^[a-f0-9]{64}$/.test(sourceEntry.sha256 || '')),
+      detail: 'source_content.md',
+    },
+    {
+      id: 'required_formats_present',
+      ok: requiredFormats.every((ext) => entries.some((f) => f.ext === ext && f.exists && f.bytes > 0)),
+      detail: requiredFormats.length ? requiredFormats.join(', ') : 'none',
+    },
+    {
+      id: 'files_integrity',
+      ok: nonSelfEntries.every((f) => f.exists && f.bytes > 0 && /^[a-f0-9]{64}$/.test(f.sha256 || '')),
+      detail: `${nonSelfEntries.length} checked`,
+    },
+    {
+      id: 'office_quality',
+      ok: !quality || quality.manifest.status === 'pass',
+      detail: quality ? `${quality.manifest.status}:${quality.manifest.score}` : 'not_required',
+    },
+    {
+      id: 'freshness',
+      ok: freshness.freshness_verified || !freshness.freshness_summary,
+      detail: freshness.freshness_summary ? (freshness.freshness_verified ? 'verified' : 'repair_required') : 'not_required',
+      warnOnly: Boolean(freshness.freshness_summary && !freshness.freshness_verified),
+    },
+  ];
+  const hardFailures = checks.filter((c) => !c.ok && !c.warnOnly);
+  const warnings = checks.filter((c) => !c.ok && c.warnOnly);
+  return {
+    status: hardFailures.length ? 'fail' : warnings.length ? 'warn' : 'pass',
+    checks,
+  };
 }
 
 async function execSummary(goal: string, ok: AgentResult[]): Promise<string> {
@@ -218,6 +322,9 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
     writeFileSync(readmePath, readme, 'utf8');
     files.unshift({ name: 'README.md', path: readmePath });
     const finalFiles = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
+    writeFileSync(deliveryManifestPath, '', 'utf8');
+    const manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
+    const smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
     writeFileSync(deliveryManifestPath, JSON.stringify({
       schema: 'aios.delivery_manifest.v1',
       generated_at: new Date().toISOString(),
@@ -226,6 +333,7 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
       primary,
       required_formats: requiredFormats,
       source_content: 'source_content.md',
+      smoke,
       freshness: {
         verified: freshness.freshness_verified,
         summary_path: freshness.freshness_summary ? 'freshness_summary.json' : null,
@@ -238,7 +346,7 @@ export async function assemble(plan: Plan, results: AgentResult[], ms: number, o
         manifest_path: 'office_quality_manifest.json',
         checklist_path: 'OFFICE_DELIVERY_CHECKLIST.md',
       } : null,
-      files: finalFiles.map((f) => ({ name: f.name, path: f.path })),
+      files: manifestFiles,
     }, null, 2), 'utf8');
     files.push({ name: 'delivery_manifest.json', path: deliveryManifestPath });
     return {
