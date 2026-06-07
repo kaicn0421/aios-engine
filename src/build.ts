@@ -1,5 +1,5 @@
 // Build —— 交付物落地。代码成品 + 文档格式转换(md→docx/pdf)。
-// 自动补齐:优先用系统自带工具(macOS textutil),缺的就按需 npm 装(puppeteer 等),保证一定能出 Word/PDF。
+// 打包版必须内置转换依赖;运行时不允许 npm install,否则用户机器离线/无 npm 时会在最后一步失败。
 import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { basename, join } from 'node:path';
@@ -36,8 +36,19 @@ export function writeArtifact(code: string, outDir: string): string {
 
 // ── 文档转换 ──────────────────────────────────────────────
 
+function injectExplicitPageBreaks(md: string): string {
+  let seen = 0;
+  return md.replace(
+    /^([ \t]*#{2,3}\s*第\s*(?:\d+|[一二三四五六七八九十百]+)\s*(?:页|頁|张|張|slide|幻灯片|投影片)?\s*[:：].*)$/gim,
+    (line) => {
+      seen++;
+      return seen === 1 ? line : `<div class="aios-page-break"></div>\n${line}`;
+    },
+  );
+}
+
 function mdToHtml(md: string): string {
-  const body = marked.parse(md) as string;
+  const body = marked.parse(injectExplicitPageBreaks(md)) as string;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>` +
     `@page{size:A4;margin:22mm 18mm 20mm 18mm}` +
     `body{font-family:"Microsoft YaHei","PingFang SC","Helvetica Neue",Arial,sans-serif;line-height:1.72;font-size:14px;color:#1f2937;max-width:820px;margin:0 auto;padding:34px 36px;background:#fff;}` +
@@ -51,6 +62,7 @@ function mdToHtml(md: string): string {
     `tr:nth-child(even) td{background:#fafafa}` +
     `blockquote{border-left:4px solid #1f4e78;background:#f4f7fb;padding:9px 13px;color:#4b5563;margin:12px 0}` +
     `code{background:#eef2f7;padding:1px 5px;border-radius:3px}pre{background:#f6f8fb;padding:12px;border-radius:6px;overflow:auto}` +
+    `.aios-page-break{break-before:page;page-break-before:always;height:0;margin:0;padding:0}` +
     `</style></head><body>${body}</body></html>`;
 }
 
@@ -97,13 +109,12 @@ function hasCmd(cmd: string): boolean {
   try { execSync(`command -v ${cmd}`, { stdio: 'ignore' }); return true; } catch { return false; }
 }
 
-/** 自动补齐:缺 npm 包就在引擎目录装上 */
-function ensureInstalled(pkg: string): void {
+async function importBundled<T = any>(pkg: string): Promise<T> {
   try {
-    execSync(`node -e "require.resolve('${pkg}')"`, { cwd: process.cwd(), stdio: 'ignore' });
-  } catch {
-    console.error(`[AIOS] 缺转换工具「${pkg}」,正在自动安装(首次较慢)…`);
-    execSync(`npm install ${pkg}`, { cwd: process.cwd(), stdio: 'inherit' });
+    return (await import(pkg)) as T;
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`bundled_dependency_missing:${pkg};${detail}`);
   }
 }
 
@@ -117,9 +128,7 @@ async function toDocx(md: string, fp: string): Promise<void> {
     finally { try { unlinkSync(tmp); } catch { /* ignore */ } }
     return;
   }
-  ensureInstalled('html-to-docx');
-  const m = 'html-to-docx';
-  const htmlToDocx = ((await import(m)) as { default: (h: string) => Promise<Buffer> }).default;
+  const htmlToDocx = (await importBundled<{ default: (h: string) => Promise<Buffer> }>('html-to-docx')).default;
   writeFileSync(fp, await htmlToDocx(html));
 }
 
@@ -156,9 +165,7 @@ export function pdfBrowserCandidates(env: NodeJS.ProcessEnv = process.env, platf
 
 /** md → pdf:用 puppeteer;打包不带 Chromium 时自动使用系统 Chrome/Edge */
 async function toPdf(md: string, fp: string): Promise<void> {
-  ensureInstalled('puppeteer');
-  const m = 'puppeteer';
-  const puppeteer = ((await import(m)) as { default: { launch: (o?: unknown) => Promise<any> } }).default;
+  const puppeteer = (await importBundled<{ default: { launch: (o?: unknown) => Promise<any> } }>('puppeteer')).default;
   let browser: any;
   let lastErr: unknown;
   for (const executablePath of [undefined, ...pdfBrowserCandidates()]) {
@@ -201,8 +208,12 @@ function extractMdTables(md: string): string[][][] {
 }
 
 function looksLikeContractLedger(name: string, content: string): boolean {
-  const text = `${name}\n${content}`.toLowerCase();
-  return /合同/.test(text) && /(台账|excel|xlsx|模板|登记|履约|供应商)/i.test(text);
+  const head = content.split('\n').slice(0, 12).join('\n');
+  const text = `${name}\n${head}`.toLowerCase();
+  return (
+    /合同/.test(name)
+    || /(合同编号|合同名称|签约方|合同金额|履约状态|履约风险|签约日期|乙方\/供应商)/.test(head)
+  ) && /(台账|excel|xlsx|模板|登记|履约|付款|发票|风险)/i.test(text);
 }
 
 function looksLikeExpenseLedger(name: string, content: string): boolean {
@@ -742,21 +753,19 @@ async function writeDynamicOfficeTableWorkbook(ExcelJS: any, fp: string, name: s
 
 /** md → xlsx:表格成工作表;合同台账类需求走专用模板;无表格则整段按行 */
 async function toXlsx(content: string, fp: string, name: string): Promise<void> {
-  ensureInstalled('exceljs');
-  const m = 'exceljs';
-  const mod = (await import(m)) as any;
+  const mod = await importBundled<any>('exceljs');
   const ExcelJS = mod.default || mod;
   const tables = extractMdTables(content);
+  if (looksLikeContractLedger(name, content)) {
+    await writeContractLedgerTemplate(ExcelJS, fp);
+    return;
+  }
   if (looksLikeExpenseLedger(name, content)) {
     await writeExpenseLedgerTemplate(ExcelJS, fp);
     return;
   }
   if (looksLikeMeetingTracker(name, content)) {
     await writeMeetingTrackerTemplate(ExcelJS, fp);
-    return;
-  }
-  if (looksLikeContractLedger(name, content)) {
-    await writeContractLedgerTemplate(ExcelJS, fp);
     return;
   }
   if (shouldUseDynamicOfficeWorkbook(name, content) && tables.length) {
@@ -799,7 +808,7 @@ async function toXlsx(content: string, fp: string, name: string): Promise<void> 
   await wb.xlsx.writeFile(fp);
 }
 
-/** md → pptx:按标题分页(自动补 pptxgenjs) */
+/** md → pptx:按标题分页 */
 function normalizePptMarkdown(md: string): string {
   const raw = md.trim();
   const parts = raw.split(/\n(?=#{1,3}\s)/).filter((p) => p.trim());
@@ -843,9 +852,7 @@ function normalizePptMarkdown(md: string): string {
 }
 
 async function toPptx(md: string, fp: string): Promise<void> {
-  ensureInstalled('pptxgenjs');
-  const m = 'pptxgenjs';
-  const mod = (await import(m)) as any;
+  const mod = await importBundled<any>('pptxgenjs');
   const PptxGen = mod.default || mod;
   const pptx = new PptxGen();
   pptx.layout = 'LAYOUT_WIDE';

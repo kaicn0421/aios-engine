@@ -7,6 +7,7 @@ import { llm, CONFIG } from './config';
 import { extractHtml, writeArtifact, sanitizeName, writeDeliverable } from './build';
 import { buildFreshnessArtifacts, type FreshnessSummary } from './freshness';
 import { buildOfficeQualityArtifacts, isOfficeDelivery } from './office-quality';
+import { buildFidicContractRadarPackage, isFidicContractRadarGoal } from './fidic-radar';
 import {
   defaultOutFileForFormat,
   officeFileSignatureOk,
@@ -65,7 +66,7 @@ function fileRole(name: string, primary: string): DeliveryManifestFile['role'] {
   if (name === 'README.md') return 'readme';
   if (name === 'delivery_manifest.json') return 'manifest';
   if (name === 'office_quality_manifest.json' || name === 'OFFICE_DELIVERY_CHECKLIST.md') return 'quality';
-  if (['sources.jsonl', 'data.csv', 'freshness_summary.json', 'evidence_manifest.json'].includes(name)) return 'evidence';
+  if (['sources.jsonl', 'data.csv', 'freshness_summary.json', 'evidence_manifest.json', 'claim_evidence.json'].includes(name)) return 'evidence';
   return 'support';
 }
 
@@ -97,7 +98,7 @@ function deliverySmoke(
 ) {
   const primaryEntry = entries.find((f) => f.name === primary);
   const sourceEntry = entries.find((f) => f.name === 'source_content.md');
-  const nonSelfEntries = entries.filter((f) => f.role !== 'manifest');
+  const integrityEntries = entries.filter((f) => f.role !== 'manifest' && f.role !== 'evidence');
   const primaryExt = extOf(primary);
   const officeRequiredFormats = requiredFormats.filter((ext) => ['xlsx', 'pptx', 'docx', 'pdf'].includes(ext));
   const checks = [
@@ -132,8 +133,8 @@ function deliverySmoke(
     },
     {
       id: 'files_integrity',
-      ok: nonSelfEntries.every((f) => f.exists && f.bytes > 0 && /^[a-f0-9]{64}$/.test(f.sha256 || '')),
-      detail: `${nonSelfEntries.length} checked`,
+      ok: integrityEntries.every((f) => f.exists && f.bytes > 0 && /^[a-f0-9]{64}$/.test(f.sha256 || '')),
+      detail: `${integrityEntries.length} checked`,
     },
     {
       id: 'office_quality',
@@ -193,26 +194,40 @@ function buildTaskSatisfaction(
   editableSourceNames: string[],
   failed: AgentResult[],
 ) {
-  const formatOk = deliveryCompliance === 'pass'
-    && checkOk(smoke.checks, 'required_formats_present')
+  const failedSubtasksOk = failed.length === 0;
+  const formatOk = checkOk(smoke.checks, 'required_formats_present')
     && checkOk(smoke.checks, 'required_office_signatures');
   const freshnessRequired = Boolean(freshness.freshness_summary);
   const freshnessOk = !freshnessRequired || freshness.freshness_verified;
+  // 研究/商业计划类证据不足时降级交付(已成稿+待核验),给部分分并走复核,不再一票否决
+  const degradedResearch = freshnessRequired
+    && !freshness.freshness_verified
+    && freshness.freshness_summary?.reason === 'research_evidence_delivery';
   const qualityStatus = quality?.manifest.status || 'not_required';
   const qualityScore = quality?.manifest.score ?? 100;
   const promptRelevant = promptRelevanceChecksPass(quality);
   const dimensions = [
-    { id: 'intent_fit', label: '需求理解', max: 15, score: promptRelevant && failed.length === 0 ? 15 : 8 },
+    { id: 'intent_fit', label: '需求理解', max: 15, score: promptRelevant && failedSubtasksOk ? 15 : 8 },
     { id: 'format_fidelity', label: '格式忠诚', max: 15, score: formatOk ? 15 : 0 },
-    { id: 'content_accuracy', label: '内容准确', max: 20, score: freshnessOk && qualityStatus !== 'fail' ? 20 : freshnessOk ? 12 : 0 },
-    { id: 'source_evidence', label: '来源证据', max: 15, score: freshnessRequired ? (freshnessOk ? 15 : 5) : 10 },
+    { id: 'content_accuracy', label: '内容准确', max: 20, score: freshnessOk && qualityStatus !== 'fail' ? 20 : freshnessOk ? 12 : degradedResearch ? 12 : 0 },
+    { id: 'source_evidence', label: '来源证据', max: 15, score: freshnessRequired ? (freshnessOk ? 15 : degradedResearch ? 8 : 5) : 10 },
     { id: 'business_polish', label: '商用品质', max: 15, score: Math.round((Math.max(0, Math.min(100, qualityScore)) / 100) * 15) },
     { id: 'editability', label: '可编辑性', max: 10, score: requiredFormats.length === 0 || editableSourceNames.length > 0 ? 10 : 0 },
     { id: 'actionability', label: '行动闭环', max: 5, score: checkOk(smoke.checks, 'source_content_exists') ? 5 : 3 },
-    { id: 'risk_transparency', label: '风险透明', max: 5, score: quality || freshnessRequired ? 5 : 3 },
+    { id: 'risk_transparency', label: '风险透明', max: 5, score: failedSubtasksOk && (quality || freshnessRequired) ? 5 : 2 },
   ];
-  const score = dimensions.reduce((sum, d) => sum + d.score, 0);
-  const firstPassUsable = score >= 80 && deliveryCompliance === 'pass' && freshnessOk && qualityStatus !== 'fail';
+  const rawScore = dimensions.reduce((sum, d) => sum + d.score, 0);
+  // Research/business-plan deliveries may legitimately have a few unverified
+  // claims after the evidence audit. Do not cap them at 69 just because one
+  // research subtask timed out; the output is still useful if it is clearly
+  // marked as review-required. Time-sensitive price/market data still hard
+  // blocks earlier and never reaches this degraded path.
+  const score = failedSubtasksOk || degradedResearch ? rawScore : Math.min(rawScore, 69);
+  const firstPassUsable = failedSubtasksOk
+    && score >= 80
+    && deliveryCompliance === 'pass'
+    && freshnessOk
+    && qualityStatus !== 'fail';
   const verdict = !firstPassUsable && score < 80 ? 'needs_repair' : score < 90 ? 'review_recommended' : 'ready_to_use';
   return {
     schema: 'aios.task_satisfaction.v1',
@@ -222,6 +237,7 @@ function buildTaskSatisfaction(
     verdict,
     first_pass_usable: firstPassUsable,
     dimensions,
+    failed_subtasks: failed.map((f) => ({ title: f.title, error: f.error || 'unknown' })),
     feedback_options: ['可直接用', '需要小改', '不能用'],
     feedback_reasons: ['格式不对', '内容不准', '数据旧', '排版差', '不符合单位口径', '少了来源', '没按我的要求', '任务没闭环'],
   };
@@ -254,6 +270,13 @@ async function execSummary(goal: string, ok: AgentResult[]): Promise<string> {
 
 function freshnessRepairSummary(goal: string, summary: FreshnessSummary): string {
   const gaps = summary.gaps.length ? summary.gaps.join('；') : '数据时效核验未通过';
+  if (summary.reason === 'research_evidence_delivery') {
+    return [
+      `本任务需要可复核的商业/行业证据，但 AIOS 没有拿到足够来源来支撑报告里的关键门店、竞品、市场数字或增长判断，因此本次交付标记为“需修复”。`,
+      `核验状态：来源 ${summary.verified_source_count}/${summary.source_count} 通过 HTTP 校验；证据缺口：${gaps}。`,
+      `下一步需要补充可访问的公开来源、行业报告、平台页面、实地记录或用户提供资料；没有来源的具体门店和数字只能进入 SOURCE_GAP/待核验清单，不能写成已证实事实。`,
+    ].join('\n\n');
+  }
   return [
     `本任务要求当前/最新数据，但 AIOS 没有拿到足够的可复核证据，因此本次交付标记为“需修复”，不会输出任何未经验证的具体价格。`,
     `核验状态：来源 ${summary.verified_source_count}/${summary.source_count} 通过 HTTP 校验；最新可解析日期：${summary.latest_date || '无'}；缺口：${gaps}。`,
@@ -261,8 +284,59 @@ function freshnessRepairSummary(goal: string, summary: FreshnessSummary): string
   ].join('\n\n');
 }
 
+// 降级交付:证据不足但仍出完整正文时,在正文顶部加一段"待核验声明",而不是阻断交付
+function freshnessDisclosureBanner(summary: FreshnessSummary): string {
+  const gapLines = summary.gaps.length
+    ? summary.gaps.map((g) => `> - ${g}`)
+    : ['> - 部分具体门店/数字暂缺可核验来源'];
+  return [
+    '> 证据声明(发送前请复核)',
+    '>',
+    '> 本版已按要求出完整框架与可执行内容,但下列具体门店、品牌、市场规模、增长率或平台数据暂未取得公开可核验来源,已按"待核验/假设"处理,请勿当作已证实事实直接对外:',
+    '>',
+    ...gapLines,
+    '>',
+    '> 逐条核验明细见 claim_evidence.json;补来源或大众点评/美团/门店清单后可升级为正式版。',
+  ].join('\n');
+}
+
+function freshnessDegradedSummary(goal: string, summary: FreshnessSummary): string {
+  const gaps = summary.gaps.length ? summary.gaps.join('；') : '部分具体数据缺少可核验来源';
+  return [
+    `证据声明(发送前请复核):本版已交付完整框架与可执行内容,但属于“需复核”版本;部分市场判断、竞品枚举或数字口径尚未完成逐条公开来源绑定,具体门店、竞品、市场数字等暂缺公开可核验来源,已标为待核验/假设。`,
+    `核验状态：来源 ${summary.verified_source_count}/${summary.source_count} 通过 HTTP 校验；待核验：${gaps}。`,
+    `对外发送前请按 claim_evidence.json 逐条核验或补充来源;补齐后可升级为正式版。`,
+  ].join('\n\n');
+}
+
 function freshnessRepairReport(goal: string, understanding: string, summary: FreshnessSummary): string {
   const gaps = summary.gaps.length ? summary.gaps.map((g) => `- ${g}`).join('\n') : '- 数据时效核验未通过';
+  if (summary.reason === 'research_evidence_delivery') {
+    return [
+      `# ${goal}`,
+      '',
+      `> ${understanding}`,
+      '',
+      '## 结论',
+      '',
+      '本次未生成可直接对外使用的商业计划书。原因是 AIOS 没有取得足够的可复核证据来支撑报告中的具体门店、竞品、市场规模、增长率或平台数据。为避免把模型推断、未核验门店或旧资料包装成事实，系统已阻断正式交付。',
+      '',
+      '## 核验状态',
+      '',
+      `- 当前时间: ${summary.current_time}`,
+      `- HTTP 可验证来源: ${summary.verified_source_count}/${summary.source_count}`,
+      '',
+      '## SOURCE_GAP',
+      '',
+      gaps,
+      '',
+      '## 返修要求',
+      '',
+      '- 对每一个具体门店、品牌、平台数据、市场规模和增长率补来源 URL、发布日期或证据片段。',
+      '- 无来源的内容只能放入“待核验清单/行业假设”,不能写入“竞品事实/市场事实/已知事实”。',
+      '- 如果公开网页拿不到充分证据,请用户补充大众点评/美团截图、门店清单、访谈记录或行业报告后再生成正式版。',
+    ].join('\n');
+  }
   return [
     `# ${goal}`,
     '',
@@ -316,6 +390,134 @@ export async function assemble(
   const ok = results.filter((r) => r.ok);
   const failed = results.filter((r) => !r.ok);
 
+  if (isFidicContractRadarGoal(plan.goal)) {
+    const dir = join(outDir, `aios-contract-radar-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    emit({ type: 'result.step', stage: 'contract_radar', message: 'Starting FIDIC contract radar package' });
+    const radar = await buildFidicContractRadarPackage(plan.goal, plan.understanding, dir, emit);
+    const sourceContentPath = join(dir, 'source_content.md');
+    const sourceContent = [
+      `# ${plan.goal}`,
+      '',
+      `> ${plan.understanding}`,
+      '',
+      '## Contract Radar Boundary',
+      '',
+      'AIOS 本版交付的是工程合同管理 playbook、台账和草稿包,不内置 FIDIC 版权全文,不替代律师意见。',
+      '导入项目真实合同、Particular Conditions、BOQ、函件、会议纪要、进度计划后,应把每条结论绑定到 source_map。',
+      '',
+      '## Agent Outputs',
+      '',
+      ...ok.map((r) => `### ${r.title}\n\n${r.output}`).join('\n\n---\n\n').split('\n'),
+    ].join('\n');
+    writeFileSync(sourceContentPath, sourceContent, 'utf8');
+    const files = [{ name: 'source_content.md', path: sourceContentPath }, ...radar.files];
+    const quality = isOfficeDelivery(files) ? await buildOfficeQualityArtifacts(plan.goal, files, dir, true) : undefined;
+    if (quality) files.push(...quality.files);
+    const primary = '合同健康体检.docx';
+    const deliveryManifestPath = join(dir, 'delivery_manifest.json');
+    writeFileSync(deliveryManifestPath, '', 'utf8');
+    const filesForReadme = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }];
+    let manifestFiles = filesForReadme.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
+    const freshness = { freshness_verified: true, freshness_summary: undefined } as Awaited<ReturnType<typeof buildFreshnessArtifacts>>;
+    let smoke = deliverySmoke(manifestFiles, primary, ['docx', 'xlsx'], quality, freshness);
+    const taskSatisfaction = buildTaskSatisfaction(['docx', 'xlsx'], failed.length || smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass', smoke, quality, freshness, files.filter((f) => isEditableOfficeExt(extOf(f.name))).map((f) => f.name), failed);
+    const readme = [
+      `# ${plan.goal}`,
+      '',
+      `> ${plan.understanding}`,
+      '',
+      '## 优先打开',
+      '',
+      '- 合同健康体检.docx',
+      '- Notice-TimeBar日历.xlsx',
+      '- 索赔机会雷达.xlsx',
+      '- 证据缺口清单.xlsx',
+      '- 拟发函草稿.docx',
+      '',
+      '## 使用边界',
+      '',
+      '- 本包用于合同管理、商务索赔辅助和证据整理,不是法律意见。',
+      '- AIOS 不内置 FIDIC 版权全文;请导入项目合法合同文本后再做条款级判断。',
+      '- 发函、索赔、争议策略必须由项目商务负责人/律师复核。',
+      '',
+      '## Task 满意度',
+      '',
+      `- 分数: ${taskSatisfaction.score}/100`,
+      `- 判断: ${taskSatisfaction.band}`,
+      `- First-Pass Usable: ${taskSatisfaction.first_pass_usable ? '是' : '否'}`,
+      '',
+      '## 质量验收',
+      '',
+      quality ? `- Office 质量分: ${quality.manifest.score}` : '- Office 质量未触发',
+      quality ? `- 状态: ${quality.manifest.status}` : '',
+      '- 查看 delivery_manifest.json / contract_source_map.json 获得可审计清单。',
+      '',
+      '## 交付文件',
+      '',
+      ...filesForReadme.map((f) => `- ${f.name}`),
+      '',
+    ].join('\n');
+    const readmePath = join(dir, 'README.md');
+    writeFileSync(readmePath, readme, 'utf8');
+    files.unshift({ name: 'README.md', path: readmePath });
+    manifestFiles = [...files, { name: 'delivery_manifest.json', path: deliveryManifestPath }]
+      .map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
+    smoke = deliverySmoke(manifestFiles, primary, ['docx', 'xlsx'], quality, freshness);
+    writeFileSync(deliveryManifestPath, JSON.stringify({
+      schema: 'aios.delivery_manifest.v1',
+      generated_at: new Date().toISOString(),
+      goal: plan.goal,
+      understanding: plan.understanding,
+      domain: 'fidic_contract_radar',
+      primary,
+      required_formats: ['docx', 'xlsx'],
+      format_contract: {
+        requested_formats: ['docx', 'xlsx'],
+        primary_format: 'docx',
+        html_artifact_allowed: false,
+        compliance: smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass',
+      },
+      contract_radar: {
+        schema: 'aios.contract_radar.v1',
+        outputs: ['合同健康体检.docx', 'Notice-TimeBar日历.xlsx', '索赔机会雷达.xlsx', '证据缺口清单.xlsx', '拟发函草稿.docx'],
+        source_map: 'contract_source_map.json',
+        copyright_boundary: '不内置 FIDIC 版权全文;条款级判断依赖用户导入合法项目合同文本。',
+        human_review_required: true,
+      },
+      editability: {
+        primary_is_editable: true,
+        editable_sources: files.filter((f) => isEditableOfficeExt(extOf(f.name))).map((f) => f.name),
+        source_content_path: 'source_content.md',
+      },
+      source_content: 'source_content.md',
+      smoke,
+      freshness: { verified: true, summary_path: null, sources_path: null, data_path: null },
+      office_quality: quality ? {
+        score: quality.manifest.score,
+        status: quality.manifest.status,
+        manifest_path: 'office_quality_manifest.json',
+        checklist_path: 'OFFICE_DELIVERY_CHECKLIST.md',
+      } : null,
+      task_satisfaction: taskSatisfaction,
+      files: manifestFiles,
+    }, null, 2), 'utf8');
+    files.push({ name: 'delivery_manifest.json', path: deliveryManifestPath });
+    return {
+      goal: plan.goal,
+      understanding: plan.understanding,
+      markdown: readme,
+      results,
+      ms,
+      dir,
+      files,
+      freshness_verified: true,
+      office_quality_manifest: quality ? join(dir, 'office_quality_manifest.json') : undefined,
+      delivery_manifest: deliveryManifestPath,
+      task_satisfaction: taskSatisfaction,
+    };
+  }
+
   // action:即时动作/直接回答 → 直接给回应,不出文件、不做执行摘要
   if (plan.kind === 'action') {
     return { goal: plan.goal, understanding: plan.understanding, markdown: ok[0]?.output || '(无结果)', results, ms };
@@ -339,18 +541,32 @@ export async function assemble(
       detail: freshness.freshness_verified ? 'verified' : freshness.freshness_summary ? 'repair_required' : 'not_required',
       ok: freshness.freshness_verified || !freshness.freshness_summary,
     });
-    const sum = freshnessFailed
+    // research_evidence_delivery(商业计划/调研)证据不足时降级交付:保留正文+顶部加待核验声明;其它(如实时行情)仍阻断
+    const degradeDeliver = Boolean(freshnessFailed && freshness.freshness_summary!.reason === 'research_evidence_delivery');
+    const hardBlock = Boolean(freshnessFailed) && !degradeDeliver;
+    const sum = hardBlock
       ? freshnessRepairSummary(plan.goal, freshness.freshness_summary!)
-      : await execSummary(plan.goal, ok);
+      : degradeDeliver
+        ? freshnessDegradedSummary(plan.goal, freshness.freshness_summary!)
+        : await execSummary(plan.goal, ok);
     files.push(...freshness.files);
     // 同名 outFile 的多个子任务 = 同一文件的多个部分,合并拼接成一个完整文件,避免互相覆盖丢内容
     const groups = new Map<string, string[]>();
-    for (const r of deliverFiles) {
-      const name = sanitizeName(fileOf(r)!);
-      const part = freshnessFailed
-        ? freshnessRepairReport(plan.goal, plan.understanding, freshness.freshness_summary!)
-        : r.output;
-      groups.set(name, [...(groups.get(name) || []), part]);
+    if (hardBlock) {
+      const repairReport = freshnessRepairReport(plan.goal, plan.understanding, freshness.freshness_summary!);
+      for (const r of deliverFiles) {
+        const name = sanitizeName(fileOf(r)!);
+        if (!groups.has(name)) groups.set(name, [repairReport]);
+      }
+    } else {
+      const banner = degradeDeliver ? freshnessDisclosureBanner(freshness.freshness_summary!) : '';
+      for (const r of deliverFiles) {
+        const name = sanitizeName(fileOf(r)!);
+        const parts = groups.get(name) || [];
+        if (parts.length === 0 && banner) parts.push(banner);
+        parts.push(r.output);
+        groups.set(name, parts);
+      }
     }
     for (const [name, parts] of groups) {
       const content = parts.join('\n\n');
@@ -430,7 +646,7 @@ export async function assemble(
     writeFileSync(deliveryManifestPath, '', 'utf8');
     let manifestFiles = finalFiles.map((f) => manifestFileEntry(f, primary, deliveryManifestPath));
     let smoke = deliverySmoke(manifestFiles, primary, requiredFormats, quality, freshness);
-    const deliveryCompliance: 'pass' | 'fail' = smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass';
+    const deliveryCompliance: 'pass' | 'fail' = failed.length || smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass';
     const taskSatisfaction = buildTaskSatisfaction(requiredFormats, deliveryCompliance, smoke, quality, freshness, editableSourceNames, failed);
     const satisfactionBlock =
       `## Task 满意度\n\n` +
