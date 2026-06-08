@@ -5,9 +5,20 @@ export const CONFIG = {
   apiKey: process.env.DEEPSEEK_API_KEY || '',
   baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   models: {
-    // DeepSeek 官方 V4:flash 便宜快(常规主力),pro 更强(深推理/复杂任务)
-    default: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+    // DeepSeek 官方 V4:pro 强推理(Agent 主力),flash 便宜快(文档管线备选)
+    default: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
     strong: process.env.DEEPSEEK_STRONG_MODEL || process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
+    flash: process.env.DEEPSEEK_FLASH_MODEL || 'deepseek-v4-flash',
+  },
+  // Agent 模式配置
+  agent: {
+    maxTurns: Number(process.env.AIOS_AGENT_MAX_TURNS || '50'),
+    temperature: Number(process.env.AIOS_AGENT_TEMPERATURE || '0.4'),
+    contextLimit: Number(process.env.AIOS_AGENT_CONTEXT_LIMIT || '120000'),
+    /** 推理深度: low | medium | high。开启后模型会先思考再行动 */
+    reasoningEffort: (process.env.AIOS_REASONING_EFFORT || 'medium') as 'low' | 'medium' | 'high',
+    /** 单次 Agent 运行最长时间（毫秒），0 = 不限。超时优雅退出，保留已产出文字 */
+    maxTimeMs: Number(process.env.AIOS_AGENT_MAX_TIME_MS || '0'),
   },
 } as const;
 

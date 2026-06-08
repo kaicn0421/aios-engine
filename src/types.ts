@@ -72,6 +72,76 @@ export interface Skill {
   system: string;       // 这个 Skill 执行时的 system prompt
 }
 
+// ── Agent 模式类型（类 Claude Code 的多轮工具调用 Agent）──
+
+/** OpenAI 兼容的 function calling 工具定义 */
+export interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+/** 模型返回的工具调用 */
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+/** 工具执行结果 */
+export interface ToolResult {
+  tool_call_id: string;
+  role: 'tool';
+  content: string;
+}
+
+/** Agent 对话消息 */
+export type AgentMessage =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: ToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+
+/** Agent 运行配置 */
+export interface AgentConfig {
+  model: string;
+  maxTurns: number;
+  temperature: number;
+  contextLimit: number;
+  /** 工作目录（文件/命令操作的沙箱边界） */
+  workDir: string;
+  /** 单次 Agent 运行的最长时间（毫秒），0 表示不限。超时后优雅退出，保留已产出文字 */
+  maxTimeMs?: number;
+}
+
+/** Agent 运行结果 */
+export interface AgentRunResult {
+  text: string;
+  turns: number;
+  toolCalls: number;
+  ms: number;
+  error?: string;
+}
+
+/** Agent 事件流 */
+export type AgentEvent =
+  | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
+  | { type: 'tool_start'; name: string; args: string }
+  | { type: 'tool_done'; name: string; ok: boolean; summary: string }
+  | { type: 'turn'; n: number }
+  | { type: 'heartbeat'; turn: number; toolCalls: number; elapsedMs: number; lastTextSnippet?: string }
+  | { type: 'done'; result: AgentRunResult }
+  | { type: 'error'; message: string };
+
+export type AgentEventSink = (e: AgentEvent) => void;
+
 /** 事件流 —— CLI 实时打印任务流,未来前端也订阅同一套 */
 export type AiosEvent =
   | { type: 'brain.start'; goal: string }
