@@ -266,3 +266,25 @@ test('local restaurant business plan rejects unsupported named competitors and f
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('internal office lists and generic docs stay out of the price gate', () => {
+  // 审计 4/4 实测误伤:TIME×DATA 泛词把内部办公文档判成价格任务,
+  // 正文整篇被换成"未生成当前价格报告"。收窄后这些必须为 false。
+  for (const prompt of [
+    '整理一份最近的物资采购需求清单',
+    '本月培训材料整理一下',
+    '目前项目风险清单更新',
+    '这份报告不对,改一下',
+  ]) {
+    assert.equal(needsFreshnessEvidence(prompt), false, prompt);
+  }
+  // 真时效请求照常进闸
+  for (const prompt of [
+    '查最近钢铁网报价并做核验',
+    '做一份今天建材市场早报',
+    '整理最近一周 DeepSeek 相关 GitHub 趋势',
+    '这份价格报告数据滞后,重新查当前价格',
+  ]) {
+    assert.equal(needsFreshnessEvidence(prompt), true, prompt);
+  }
+});

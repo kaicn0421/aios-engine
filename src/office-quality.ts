@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanUserGoal } from './goal';
+import { requestedOfficeSize, goalAllowsMorePages } from './office-format';
 
 export interface DeliveryFile {
   name: string;
@@ -106,7 +107,7 @@ function relevanceKeywords(goal: string): string[] {
     .replace(/# AIOS[\s\S]*$/i, '')
     .replace(/[A-Za-z0-9_.-]+\.(xlsx|pptx|docx|pdf)/gi, '')
     .replace(/\s+/g, '');
-  const matches = compact.match(/Claude\s*Code|AIOS|Claude|Codex|Memory|Session|Tool|Prompt|MCP|OpenClaw|Siri|C-lite|runtime|router|connector|执行内核|权限|沙箱|质量闸|交付链路|FIDIC|fidic|菲迪克|Notice|notice|TimeBar|timebar|DAAB|DAB|EOT|中铁|办公室|项目部|工程合同|合同|索赔|变更|付款|BOQ|证据|风险|采购|比价|报价|费用|报销|会议|纪要|督办|资料|归档|月度|工作|汇报|方案|计划|通知|调研|研究|薪资|工资|价格|行情|台账|清单|报表|登记|统计|汇总|明细|对账|流程|优化|餐饮|泰餐|餐厅|宁波|上市|融资|商业计划|品牌|选址|供应链|食品安全|菜单|翻台|坪效|门店/g) || [];
+  const matches = compact.match(/Claude\s*Code|AIOS|Claude|Codex|Memory|Session|Tool|Prompt|MCP|OpenClaw|Siri|C-lite|runtime|router|connector|执行内核|权限|沙箱|质量闸|交付链路|FIDIC|fidic|菲迪克|Notice|notice|TimeBar|timebar|DAAB|DAB|EOT|中铁|办公室|项目部|工程合同|合同|索赔|变更|付款|BOQ|证据|风险|采购|比价|报价|费用|报销|会议|纪要|督办|资料|归档|月度|工作|汇报|方案|计划|通知|调研|研究|薪资|工资|价格|行情|支出|收入|流水|记账|台账|清单|报表|登记|统计|汇总|明细|对账|流程|优化|餐饮|泰餐|餐厅|宁波|上市|融资|商业计划|品牌|选址|供应链|食品安全|菜单|翻台|坪效|门店/g) || [];
   const unique = [...new Set(matches.map((match) => match.replace(/\s+/g, ' ').trim()))];
   const generic = new Set(['方案', '计划', '建议', '通知', '调研', '研究', '工作', '汇报']);
   const specific = unique.filter((kw) => !generic.has(kw));
@@ -355,6 +356,15 @@ async function pptxChecks(file: DeliveryFile, goal: string): Promise<Array<{ id:
   return [
     { id: 'pptx_readable', ok: names.includes('[Content_Types].xml'), detail: 'PPTX zip 可读' },
     { id: 'pptx_multi_slide', ok: slides.length >= 3, detail: `幻灯片:${slides.length}` },
+    ...(() => {
+      // 页数对齐验收:用户要 N 页就验 N±2;"至少/以上"只验下限(审计:只验≥3 页,16 页也放行)
+      const wanted = requestedOfficeSize(goal, file.name).slides || 0;
+      if (!wanted) return [];
+      const ok = goalAllowsMorePages(goal)
+        ? slides.length >= wanted
+        : Math.abs(slides.length - wanted) <= 2;
+      return [{ id: 'pptx_requested_page_alignment', ok, detail: `请求${wanted}页,实际${slides.length}页` }];
+    })(),
     { id: 'pptx_theme', ok: names.includes('ppt/theme/theme1.xml'), detail: '包含主题文件' },
     { id: 'pptx_has_real_text', ok: text.length >= 60, detail: `文字长度:${text.length}` },
     { id: 'pptx_has_flow', ok: /目录|重点|问题|风险|计划|下一步|结论|汇报逻辑/.test(text), detail: '含汇报逻辑/问题/计划信号' },

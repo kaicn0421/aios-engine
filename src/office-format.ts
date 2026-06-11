@@ -47,7 +47,7 @@ export function officeFormatsFromGoal(goal: string): string[] {
   if (/(?:pptx?|powerpoint|slides?|presentation|幻灯片|演示文稿|汇报ppt|汇报材料|路演|演示)/i.test(compact)) {
     formats.push('pptx');
   }
-  if (/(?:excel|xlsx|spreadsheet|工作簿|电子表格|台账|对账|登记表|统计表|汇总表|明细表|费用表|付款表|发票表|预算表|测算表|报价单|比价表|采购表|跟踪表|督办表|清单|报表)/i.test(compact)) {
+  if (/(?:excel|xlsx|spreadsheet|工作簿|电子表格|台账|对账|登记表|统计表|汇总表|明细表|费用表|付款表|发票表|预算表|测算表|报价单|比价表|采购表|跟踪表|督办表)/i.test(compact)) {
     formats.push('xlsx');
   }
   if (/(?:word|docx|文档|报告|调研|研究|建议书|方案|计划|计划书|商业计划|上市计划|纪要|请示|情况说明|通知|函|制度|合同评审|总结|简报)/i.test(compact)) {
@@ -122,4 +122,74 @@ export function officeFileSignatureOk(path: string, ext: string): boolean {
 
 export function officePrimaryExt(requiredFormats: string[]): string | null {
   return requiredFormats.find((ext) => ['xlsx', 'pptx', 'docx', 'pdf'].includes(ext)) || null;
+}
+
+
+// ============ 页数/张数共享原语(单一真相源) ============
+// 旧版补页在 agent 层按"每个子任务"各自补满整体页数,N 个子任务合并进同一文件后
+// 总页数 N 倍超标("要 3 页给 16 页",审计实证)。页数解析/统计/校准统一放这里,
+// agent 不再补页,result 合并后单点校准,office-quality 据此做对齐验收。
+export function requestedOfficeSize(goal: string, fileName: string): { pages: number; slides: number } {
+  const text = goal.replace(/，/g, ',');
+  let pages = 0;
+  let slides = 0;
+  const re = /(\d{1,3})\s*(页|頁|p|pages?|张|張|slides?|幻灯片|投影片)/gi;
+  for (const m of text.matchAll(re)) {
+    const n = Math.max(1, Math.min(80, Number(m[1] || 0)));
+    const unit = String(m[2] || '').toLowerCase();
+    if (!n) continue;
+    if (/张|張|slide|幻灯片|投影片/.test(unit)) slides = Math.max(slides, n);
+    else pages = Math.max(pages, n);
+  }
+  if (/pptx?|powerpoint|幻灯片|演示|汇报/.test(`${fileName}\n${goal}`.toLowerCase()) && pages && !slides) {
+    slides = pages;
+    pages = 0;
+  }
+  return { pages, slides };
+}
+
+export function goalAllowsMorePages(goal: string): boolean {
+  return /(至少|以上|不少于|起码|最少)/.test(goal);
+}
+
+export function estimateDocumentPages(markdown: string): number {
+  const plain = markdown
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/[#>*_`|:-]/g, '')
+    .replace(/\s+/g, '');
+  return Math.max(1, Math.ceil(plain.length / 760));
+}
+
+export function pptContentSlideCount(markdown: string): number {
+  const headingSlides = (markdown.match(/^#{1,3}\s*第\s*\d+\s*(页|頁|张|張|slide|幻灯片)?[:：]/gim) || []).length;
+  if (headingSlides) return headingSlides;
+  const headings = (markdown.match(/^#{1,3}\s+/gm) || []).length;
+  return Math.max(0, headings - 1);
+}
+
+// 超额裁剪:按标题边界保留前 maxSlides 个内容节(用户没说"至少"时,要 3 页就给 3 页)
+export function truncatePptMarkdownToSlides(markdown: string, maxSlides: number): string {
+  if (maxSlides <= 0 || pptContentSlideCount(markdown) <= maxSlides) return markdown;
+  const lines = markdown.split('\n');
+  const out: string[] = [];
+  let slideCount = 0;
+  const slideHead = /^#{1,3}\s*第\s*\d+\s*(页|頁|张|張|slide|幻灯片)?[:：]/i;
+  const usingNumbered = lines.some((l) => slideHead.test(l.trim()));
+  let plainHeadings = 0;
+  for (const line of lines) {
+    const t = line.trim();
+    const isNumbered = slideHead.test(t);
+    const isHeading = /^#{1,3}\s+/.test(t);
+    if (usingNumbered ? isNumbered : isHeading) {
+      if (!usingNumbered) plainHeadings++;
+      const effective = usingNumbered ? slideCount + 1 : plainHeadings - 1; // 非编号模式首个标题视作封面
+      if (usingNumbered) slideCount++;
+      const current = usingNumbered ? slideCount : effective;
+      if (current > maxSlides) break;
+    }
+    out.push(line);
+  }
+  return out.join('\n').trimEnd();
 }

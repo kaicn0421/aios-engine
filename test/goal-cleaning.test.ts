@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanUserGoal } from '../src/goal';
+import { cleanUserGoal, hostContextSlices, hasRepairContext } from '../src/goal';
 import { needsFreshnessEvidence } from '../src/freshness';
 import { defaultOutFileForFormat, officeFormatsFromGoal } from '../src/office-format';
 import { localFallbackPlan } from '../src/brain';
@@ -127,4 +127,15 @@ test('timed-out retry falls back to an auditable rescue section instead of faili
   assert.match(rescued.output, /AIOS 超时救援/);
   assert.match(rescued.output, /执行动作表/);
   assert.match(rescued.output, /SOURCE_GAP|待核验/);
+});
+
+test('host context slices survive for execution while display goal stays clean', () => {
+  const raw = '做周报\n\n# AIOS 办公交付物质量契约\n{"formats":["pptx"]}\n\n# AIOS 自动返修上下文\n上一版状态: needs_repair;原因: 页数不足';
+  assert.equal(cleanUserGoal(raw), '做周报');
+  const slices = hostContextSlices(raw);
+  assert.match(slices, /质量契约/);
+  assert.match(slices, /needs_repair/);
+  assert.equal(hasRepairContext(raw), true);
+  assert.equal(hasRepairContext('做周报'), false);
+  assert.equal(hostContextSlices('做周报'), '');
 });

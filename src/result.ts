@@ -13,7 +13,14 @@ import {
   officeFileSignatureOk,
   officeFormatsFromGoal,
   officePrimaryExt,
+  requestedOfficeSize,
+  goalAllowsMorePages,
+  pptContentSlideCount,
+  estimateDocumentPages,
+  truncatePptMarkdownToSlides,
 } from './office-format';
+import type { Provider } from './providers';
+import { requiresStructuredDataRows } from './freshness';
 import type { AgentResult, Deliverable, EventSink, Plan } from './types';
 
 function extOf(name: string): string {
@@ -385,12 +392,74 @@ function freshnessRepairReport(goal: string, understanding: string, summary: Fre
   ].join('\n');
 }
 
+async function calibrateOfficeContent(
+  content: string,
+  fileName: string,
+  goal: string,
+  calibrator: { provider: Provider; model: string } | undefined,
+  emit: EventSink,
+): Promise<string> {
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  if (!['pptx', 'docx', 'pdf'].includes(ext)) return content;
+  const target = requestedOfficeSize(goal, fileName);
+  if (ext === 'pptx') {
+    const wanted = target.slides || 0;
+    if (wanted <= 0) return content;
+    let out = content;
+    // 超额裁剪:用户说"3页"就给 3 页;只有"至少/以上"才放行超额
+    if (!goalAllowsMorePages(goal) && pptContentSlideCount(out) > wanted + 2) {
+      const before = pptContentSlideCount(out);
+      out = truncatePptMarkdownToSlides(out, wanted);
+      emit({ type: 'result.step', stage: 'write', message: 'Trimming slides to requested count', detail: `${before}→${pptContentSlideCount(out)}/${wanted}` });
+    }
+    let rounds = 0;
+    while (calibrator && pptContentSlideCount(out) < wanted && rounds < 10) {
+      rounds++;
+      const have = pptContentSlideCount(out);
+      const cont = await calibrator.provider.chat(calibrator.model, {
+        system: '你是严谨的商务 PPT 内容续写助手。只输出可直接拼接到原 Markdown 后面的内容。',
+        user:
+          `整体目标:${goal}\n\n这份 PPT 需要 ${wanted} 页,当前只有约 ${have} 页。` +
+          `请继续写第 ${have + 1} 页到第 ${Math.min(wanted, have + 8)} 页。\n\n` +
+          '硬规则:\n- 每页必须用 "## 第N页: 标题" 开头。\n- 每页 4-6 条要点,适合办公室汇报。\n- 不要重复已有页面,不要解释,不要代码块。\n\n' +
+          `已有内容末尾:\n${out.slice(-5000)}`,
+        maxTokens: 8192,
+        temperature: 0.45,
+      });
+      if (!cont.trim()) break;
+      out += `\n\n${cont.trim()}`;
+    }
+    return out;
+  }
+  const wanted = target.pages || 0;
+  if (wanted <= 0 || !calibrator) return content;
+  let out = content;
+  let rounds = 0;
+  while (estimateDocumentPages(out) < wanted && rounds < 12) {
+    rounds++;
+    const cont = await calibrator.provider.chat(calibrator.model, {
+      system: '你是正式商务文档续写助手。只输出可直接拼接到原 Markdown 后面的新章节内容。',
+      user:
+        `整体目标:${goal}\n\n这份 ${ext.toUpperCase()} 至少需要 ${wanted} 页,当前估算约 ${estimateDocumentPages(out)} 页。` +
+        '请继续补充新的正式章节,每轮约 2500-3500 个中文字符。\n\n' +
+        '硬规则:\n- 使用清晰标题层级、表格或清单、结论和下一步。\n- 不要重复已有段落,不要解释,不要代码块。\n- 内容必须贴合用户任务,不能用占位话。\n\n' +
+        `已有内容末尾:\n${out.slice(-6000)}`,
+      maxTokens: 8192,
+      temperature: 0.45,
+    });
+    if (!cont.trim()) break;
+    out += `\n\n${cont.trim()}`;
+  }
+  return out;
+}
+
 export async function assemble(
   plan: Plan,
   results: AgentResult[],
   ms: number,
   outDir: string,
   emit: EventSink = () => {},
+  calibrator?: { provider: Provider; model: string },
 ): Promise<Deliverable> {
   const requiredFormats = officeFormatsFromGoal(plan.goal);
   const primaryFormat = officePrimaryExt(requiredFormats);
@@ -567,7 +636,14 @@ export async function assemble(
       ok: freshness.freshness_verified || !freshness.freshness_summary,
     });
     // research_evidence_delivery(商业计划/调研)证据不足时降级交付:保留正文+顶部加待核验声明;其它(如实时行情)仍阻断
-    const degradeDeliver = Boolean(freshnessFailed && freshness.freshness_summary!.reason === 'research_evidence_delivery');
+    // hardBlock 只留给"必须给出具体数字行"的任务(价格表/行情数据);
+    // 其余时效任务取证不足时 banner 降级交付,正文不再整篇蒸发(审计实证:
+    // 办公清单任务曾被整体替换成"未生成当前价格报告")。
+    const degradeDeliver = Boolean(
+      freshnessFailed
+        && (freshness.freshness_summary!.reason === 'research_evidence_delivery'
+          || !requiresStructuredDataRows(plan.goal)),
+    );
     const hardBlock = Boolean(freshnessFailed) && !degradeDeliver;
     const sum = hardBlock
       ? freshnessRepairSummary(plan.goal, freshness.freshness_summary!)
@@ -595,7 +671,10 @@ export async function assemble(
     }
     const degradedFormats: Array<{ name: string; ext: string; reason: string }> = [];
     for (const [name, parts] of groups) {
-      const content = parts.join('\n\n');
+      let content = parts.join('\n\n');
+      // 页数单点校准:补页/裁剪只在合并后的整份内容上做一次。
+      // 旧版在 agent 层按每个子任务各自补满整体页数,N 个子任务合并后 N 倍超标(审计实证)。
+      content = await calibrateOfficeContent(content, name, plan.goal, calibrator, emit);
       emit({ type: 'result.step', stage: 'write', message: 'Writing editable deliverable', detail: name });
       let writtenName = name;
       let fp: string;
@@ -618,6 +697,10 @@ export async function assemble(
       for (const ext of requiredFormats) {
         if (ext === extOf(writtenName)) continue;
         if (degradedFormats.some((d) => d.ext === ext)) continue;
+        // 禁 xlsx companion:goal 捎带表类词就把 docx 正文再塞进台账模板管线,
+        // 附赠一份与正文无关的 xlsx,烟测还把凑数文件当达标证据(审计实证)。
+        // pdf(预览形态)和 docx(pdf 为主时的可编辑源)是正当 companion,保留。
+        if (ext === 'xlsx') continue;
         const extraName = sanitizeName(`${withoutExt(writtenName)}.${ext}`);
         if (files.some((f) => f.name === extraName)) continue;
         emit({ type: 'result.step', stage: 'write', message: 'Writing requested companion format', detail: extraName });

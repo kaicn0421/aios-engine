@@ -1312,3 +1312,100 @@ test('pdf browser candidate detection supports packaged Windows machines', () =>
   const candidates = pdfBrowserCandidates(env, 'win32', false).join('\n');
   assert.match(candidates, /Microsoft\\Edge\\Application\\msedge\.exe|Google\\Chrome\\Application\\chrome\.exe/);
 });
+
+test('custom spreadsheet asks keep agent tables instead of expense-template hijack', async () => {
+  // 审计实测复现:"个人支出统计表"被 brain 改名+泛匹配劫持成"费用报销台账模板",
+  // agent 按真实业务字段产出的表格被整体丢弃。真内容必须落进 xlsx。
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-dynamic-xlsx-'));
+  try {
+    const plan: Plan = {
+      goal: '帮我做一份2026年5月个人支出统计表Excel,含分类汇总',
+      understanding: '生成个人支出统计 Excel',
+      kind: 'document',
+      subtasks: [{
+        id: 's1',
+        title: '支出统计表生成',
+        objective: '按用户真实场景设计字段',
+        skill: 'data',
+        complexity: 'standard',
+        dependsOn: [],
+        outFile: '个人支出统计表.xlsx',
+      }],
+    };
+    const results: AgentResult[] = [{
+      subtaskId: 's1',
+      title: '支出统计表生成',
+      skill: 'data',
+      model: 'mock',
+      ok: true,
+      ms: 1,
+      output: [
+        '| 日期 | 消费分类 | 项目说明 | 金额 | 支付方式 | 备注 |',
+        '|---|---|---|---:|---|---|',
+        '| 2026-05-02 | 餐饮 | 家庭聚餐 | 480 | 微信 | 示例 |',
+        '| 2026-05-06 | 交通 | 加油 | 300 | 信用卡 | 示例 |',
+      ].join('\n'),
+    }];
+    const d = await assemble(plan, results, 1, outDir);
+    const xlsx = d.files?.find((f) => f.name === '个人支出统计表.xlsx');
+    assert.ok(xlsx, `贴题文件名必须保留: ${JSON.stringify(d.files?.map((f) => f.name))}`);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(xlsx.path);
+    assert.ok(!wb.getWorksheet('费用报销台账'), '不得劫持成费用报销固定模板');
+    const sheetText = JSON.stringify(
+      wb.worksheets.map((ws) => {
+        const rows: unknown[] = [];
+        ws.eachRow((row) => rows.push(row.values));
+        return rows;
+      }),
+    );
+    assert.ok(sheetText.includes('消费分类'), `agent 真实字段必须写进 xlsx: ${sheetText.slice(0, 400)}`);
+    assert.ok(sheetText.includes('家庭聚餐'), 'agent 真实数据行必须写进 xlsx');
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('merged pptx is trimmed to the requested page count unless goal says at-least', async () => {
+  // 审计实证:补页按每个子任务各自补满,"要 3 页给 16 页";质量闸只验 ≥3 页。
+  // 合并后单点校准:无"至少"措辞时超额裁剪到请求页数,质量闸验 N±2 对齐。
+  const slides16 = Array.from({ length: 16 }, (_, i) =>
+    `## 第${i + 1}页: 模块${i + 1}\n- 要点A\n- 要点B`).join('\n\n');
+  const mkPlan = (goal: string): Plan => ({
+    goal,
+    understanding: 'PPT 交付',
+    kind: 'document',
+    subtasks: [{
+      id: 's1', title: 'PPT', objective: '生成 PPT', skill: 'writing',
+      complexity: 'standard', dependsOn: [], outFile: '汇报材料.pptx',
+    }],
+  });
+  const mkResults = (): AgentResult[] => [{
+    subtaskId: 's1', title: 'PPT', skill: 'writing', model: 'mock', ok: true, ms: 1,
+    output: slides16,
+  }];
+
+  const exact = mkdtempSync(join(tmpdir(), 'aios-pptx-trim-'));
+  try {
+    const d = await assemble(mkPlan('做一份3页的产品介绍PPT'), mkResults(), 1, exact);
+    const quality = JSON.parse(readFileSync(d.files!.find((f) => f.name === 'office_quality_manifest.json')!.path, 'utf8'));
+    const fileQ = quality.files.find((f: any) => f.name === '汇报材料.pptx');
+    const align = fileQ.checks.find((c: any) => c.id === 'pptx_requested_page_alignment');
+    assert.ok(align, JSON.stringify(fileQ.checks));
+    assert.ok(align.ok, `要3页必须给≈3页: ${align.detail}`);
+  } finally {
+    rmSync(exact, { recursive: true, force: true });
+  }
+
+  const atLeast = mkdtempSync(join(tmpdir(), 'aios-pptx-atleast-'));
+  try {
+    const d = await assemble(mkPlan('做一份至少3页的产品介绍PPT'), mkResults(), 1, atLeast);
+    const quality = JSON.parse(readFileSync(d.files!.find((f) => f.name === 'office_quality_manifest.json')!.path, 'utf8'));
+    const fileQ = quality.files.find((f: any) => f.name === '汇报材料.pptx');
+    const align = fileQ.checks.find((c: any) => c.id === 'pptx_requested_page_alignment');
+    assert.ok(align.ok, `"至少3页"超额应放行: ${align.detail}`);
+    assert.match(align.detail, /实际1[0-9]页/, '至少措辞不裁剪');
+  } finally {
+    rmSync(atLeast, { recursive: true, force: true });
+  }
+});

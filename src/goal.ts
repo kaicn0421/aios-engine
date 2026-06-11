@@ -18,3 +18,23 @@ export function cleanUserGoal(goal: string): string {
   return cleaned || String(goal || '').trim();
 }
 
+
+
+// 宿主(Rust 端)拼进 goal 的契约/返修/偏好上下文:从首个 marker 起整段截出。
+// cleanUserGoal 在入口剥掉它们后,返修上下文/质量契约曾全程无人消费=自动返修断链
+// (审计实证:模型看不到要修什么,manifest 无任何 repair 痕迹)。
+export function hostContextSlices(goal: string): string {
+  const raw = String(goal || '');
+  let first = -1;
+  for (const marker of CONTEXT_MARKERS) {
+    const idx = raw.indexOf(marker);
+    if (idx >= 0 && (first < 0 || idx < first)) first = idx;
+  }
+  if (first < 0) return '';
+  return raw.slice(first).trim().slice(0, 2400);
+}
+
+export function hasRepairContext(goal: string): boolean {
+  const raw = String(goal || '');
+  return raw.includes('# AIOS 自动返修上下文') || raw.includes('# 上一版失败/需修复上下文');
+}

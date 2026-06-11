@@ -169,8 +169,15 @@ outFile 规则:【同一份成果的所有章节子任务必须用同一个 outF
       : 'document';
   if (officeFormats.length) {
     const primary = officeFormats[0] || 'docx';
+    // 保留 Brain 起的贴题文件名(如"个人支出统计表.xlsx"),无条件覆盖成关键词
+    // 默认名曾触发固定模板劫持链(审计实证)。统一到首个合法名,维持单文件合并不变量。
+    const ext = `.${primary}`;
+    const brainName = subtasks
+      .map((sub) => (sub.outFile || '').trim())
+      .find((n) => n.toLowerCase().endsWith(ext));
+    const sharedOut = brainName || defaultOutFileForFormat(goal, primary);
     for (const sub of subtasks) {
-      sub.outFile = defaultOutFileForFormat(goal, primary);
+      sub.outFile = sharedOut;
       if (sub.skill === 'code') sub.skill = primary === 'xlsx' ? 'data' : 'writing';
       sub.objective += `\n本任务必须产出 ${officeFormats.map((f) => `.${f}`).join('/')} 可编辑文件,禁止输出 HTML artifact 冒充办公文件。`;
       if (primary === 'xlsx') {

@@ -4,8 +4,11 @@ import { localFallbackPlan, plan as makePlan } from './brain';
 import { runAgent } from './agent';
 import { assemble } from './result';
 import { recall, remember } from './memory';
-import { cleanUserGoal } from './goal';
-import { freshnessObservationContext } from './freshness';
+import { cleanUserGoal, hostContextSlices, hasRepairContext } from './goal';
+import { officeFormatsFromGoal, defaultOutFileForFormat } from './office-format';
+import { freshnessObservationContext, invalidateFreshnessObservation } from './freshness';
+import { getProvider } from './providers';
+import { CONFIG } from './config';
 import type { AgentResult, Deliverable, EventSink, SubTask } from './types';
 
 function defaultOutputDir(): string {
@@ -205,12 +208,30 @@ export async function run(
 ): Promise<Deliverable> {
   const t0 = Date.now();
   const userGoal = cleanUserGoal(goal);
+  // 宿主上下文(返修说明/质量契约/客户偏好)曾在这一行后全程蒸发=自动返修断链。
+  // 现在:展示与意图判定用干净 userGoal,执行用 hostContext 随子任务下发。
+  const hostContext = hostContextSlices(goal);
+  const repairRound = hasRepairContext(goal);
 
   emit({ type: 'brain.start', goal: userGoal });
   const p = await makePlanWithTimeout(userGoal, recall(), emit); // 召回长期记忆注入 Brain;超时走本地兜底计划
+  if (hostContext) {
+    for (const sub of p.subtasks) {
+      sub.objective += `\n\n【宿主上下文(契约/返修要求,执行时必须遵守)】\n${hostContext}`;
+    }
+  }
+  // 质量契约里点名的格式:干净 goal 推不出格式时按契约补(契约 slice 只在原始 goal 里)
+  const contractFormats = officeFormatsFromGoal(goal);
+  if (contractFormats.length && officeFormatsFromGoal(userGoal).length === 0) {
+    const primary = contractFormats[0]!;
+    const shared = p.subtasks.map((s) => s.outFile || '').find((n) => n.toLowerCase().endsWith(`.${primary}`))
+      || defaultOutFileForFormat(userGoal, primary);
+    for (const sub of p.subtasks) sub.outFile = shared;
+  }
   emit({ type: 'brain.done', plan: p });
 
   emit({ type: 'result.step', stage: 'evidence', message: 'Collecting shared web evidence', detail: 'task-level cache' });
+  if (repairRound) invalidateFreshnessObservation(goal); // 返修轮不许吃第一轮失败取证的缓存
   await freshnessObservationContext(userGoal).catch(() => '');
 
   // 依赖编排:按 dependsOn 分层执行。无依赖的先并行跑,完成后再跑依赖它们的(把前置产出当上下文传入)。
@@ -245,7 +266,9 @@ export async function run(
   const results = p.subtasks.map((s) => done.get(s.id)!);
 
   emit({ type: 'result.start' });
-  const deliverable = await assemble(p, results, Date.now() - t0, outDir, emit);
+  // 页数校准器:合并后整份内容统一补页/裁剪(见 result.calibrateOfficeContent)
+  const calibrator = { provider: getProvider('deepseek'), model: CONFIG.models.default };
+  const deliverable = await assemble(p, results, Date.now() - t0, outDir, emit, calibrator);
   emit({ type: 'result.done', deliverable });
 
   await remember(userGoal, p.kind).catch(() => {}); // 记录任务 + 提炼偏好(确保写入,CLI 短进程才不丢)

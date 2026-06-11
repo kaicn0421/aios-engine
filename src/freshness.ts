@@ -98,6 +98,12 @@ const HARD_MARKET_WORDS = [
   '黄金', 'gold', 'diesel', 'fuel', '数据', '指数', 'cpi', 'gdp', 'pmi',
 ];
 
+// 调研风味词:真要看外部世界的请求(热搜/话题/趋势/早报/github…)
+const RESEARCH_FLAVOR_WORDS = [
+  '调研', '走势', '趋势', '热搜', '热榜', '热门', '热度', '话题', '讨论',
+  '榜单', '排名', '舆情', '早报', 'github',
+];
+
 export function needsFreshnessEvidence(goal: string): boolean {
   const compact = cleanUserGoal(goal).toLowerCase().replace(/\s+/g, '');
   if (!compact) return false;
@@ -110,11 +116,16 @@ export function needsFreshnessEvidence(goal: string): boolean {
   }
   const marketPrice = compact.includes('价格')
     && ['调研', '报告', '分析', '趋势', '走势', '行情', '市场', '核验', '来源', '清单', '报价'].some((w) => compact.includes(w));
-  const freshnessRepair = FRESHNESS_REPAIR_WORDS.some((w) => compact.includes(w))
-    && DATA_WORDS.some((w) => compact.includes(w));
+  // 时间词 × 触发词(硬市场 ∪ 调研风味)才进取证闸。旧规则 TIME×DATA_WORDS 的
+  // DATA 泛词(材料/清单/需求/项目/风险/报告…)把"最近的采购需求清单/本月培训材料"
+  // 这类内部办公文档判成价格任务,正文整篇被换成"未生成当前价格报告"(审计 4/4 实测)。
+  // 产品裁决:要价格/行情证据的请求自带硬词;内部文档不进价格闸。
+  const hasTrigger = HARD_MARKET_WORDS.some((w) => compact.includes(w))
+    || RESEARCH_FLAVOR_WORDS.some((w) => compact.includes(w));
+  const freshnessRepair = FRESHNESS_REPAIR_WORDS.some((w) => compact.includes(w)) && hasTrigger;
   return freshnessRepair
     || marketPrice
-    || (TIME_WORDS.some((w) => compact.includes(w)) && DATA_WORDS.some((w) => compact.includes(w)));
+    || (TIME_WORDS.some((w) => compact.includes(w)) && hasTrigger);
 }
 
 export function needsResearchEvidence(goal: string): boolean {
@@ -137,7 +148,7 @@ function needsLocalBusinessClaimAudit(goal: string): boolean {
   return needsResearchEvidence(goal) && local && business;
 }
 
-function requiresStructuredDataRows(goal: string): boolean {
+export function requiresStructuredDataRows(goal: string): boolean {
   const compact = cleanUserGoal(goal).toLowerCase().replace(/\s+/g, '');
   return /(价格|报价|行情|均价|指数|汇率|股价|薪资|工资|热榜|热搜|排名|榜单|销量|产量|库存|天气|航班|机票|油价|柴油|汽油|diesel|fuel|gold|黄金)/i
     .test(compact);
@@ -407,6 +418,13 @@ function observedPageScore(page: ObservedPage, goal: string): number {
   if (/水泥|价格|行情|指数|报价|P\.?O?42\.?5|diesel|fuel|oil price|baht|litre|liter|retail price|柴油|油价/i.test(`${page.title || ''} ${page.text.slice(0, 500)}`)) score += 3;
   if (/eppo\.go\.th|globalpetrolprices\.com|dailyfuels\.com|bangchak\.co\.th|d-gis\.com/i.test(page.url)) score += 8;
   return score;
+}
+
+// 返修轮强制重取证:缓存 key 是 cleanUserGoal,同进程返修会命中第一轮失败取证(审计实证)
+export function invalidateFreshnessObservation(goal: string): void {
+  const key = cleanUserGoal(goal);
+  observationContextCache.delete(`fresh:${key}`);
+  observationContextCache.delete(`research:${key}`);
 }
 
 export async function freshnessObservationContext(goal: string): Promise<string> {

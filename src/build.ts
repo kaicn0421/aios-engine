@@ -68,7 +68,10 @@ function mdToHtml(md: string): string {
 
 function normalizeFormalDocumentMarkdown(md: string): string {
   const raw = md.trim();
-  if (/^#{1,3}\s/m.test(raw) && /一、|二、|执行摘要|结论|建议|下一步|风险|事项|通知|报告/m.test(raw)) return raw;
+  // 只有"完全没有任何标题的纯行列表"才包公文骨架。旧条件要求 标题+公文关键词
+  // 同时存在才放行,带标题的简历/手册/课程表会被剥掉层级强排成四段公文,
+  // 还塞进"原文未提供明确风险项"占位(审计实证)。
+  if (/^#{1,6}\s/m.test(raw)) return raw;
   const lines = raw
     .split('\n')
     .map((line) => line.trim())
@@ -88,21 +91,17 @@ function normalizeFormalDocumentMarkdown(md: string): string {
     else if (buckets.summary.length < 2) buckets.summary.push(line);
     else buckets.body.push(line);
   }
-  return [
-    `# ${title}`,
-    '',
-    '## 一、执行摘要',
-    ...(buckets.summary.length ? buckets.summary : lines.slice(0, 2)).map((line) => `- ${line}`),
-    '',
-    '## 二、正文事项',
-    ...(buckets.body.length ? buckets.body : lines.slice(2)).map((line) => `- ${line}`),
-    '',
-    '## 三、风险与建议',
-    ...(buckets.risk.length ? buckets.risk : ['原文未提供明确风险项,需人工补充。']).map((line) => `- ${line}`),
-    '',
-    '## 四、下一步',
-    ...(buckets.next.length ? buckets.next : ['原文未提供下一步安排,需补充责任人和时间节点。']).map((line) => `- ${line}`),
-  ].join('\n');
+  const sections: string[] = [`# ${title}`];
+  const pushSection = (heading: string, items: string[]) => {
+    if (!items.length) return;
+    sections.push('', heading, ...items.map((line) => `- ${line}`));
+  };
+  pushSection('## 一、执行摘要', buckets.summary.length ? buckets.summary : lines.slice(0, 2));
+  pushSection('## 二、正文事项', buckets.body.length ? buckets.body : lines.slice(2));
+  // 空桶整节跳过:不再编造"原文未提供明确风险项"占位章节
+  pushSection('## 三、风险与建议', buckets.risk);
+  pushSection('## 四、下一步', buckets.next);
+  return sections.join('\n');
 }
 
 function hasCmd(cmd: string): boolean {
@@ -213,17 +212,20 @@ function looksLikeContractLedger(name: string, content: string): boolean {
   return (
     /合同/.test(name)
     || /(合同编号|合同名称|签约方|合同金额|履约状态|履约风险|签约日期|乙方\/供应商)/.test(head)
-  ) && /(台账|excel|xlsx|模板|登记|履约|付款|发票|风险)/i.test(text);
+  ) && /(台账|模板|登记|清单|履约)/i.test(name.toLowerCase());
 }
 
+// 容器词(台账/模板)只看文件名:曾用 name+content 泛匹配,且 'xlsx' 本身在词表里
+// (任何 .xlsx 文件名恒真),叠加 brain 强改名,"个人支出统计表"被整体劫持成
+// 费用报销台账模板、agent 产出的贴题表格被丢弃(审计实测复现)。
 function looksLikeExpenseLedger(name: string, content: string): boolean {
   const text = `${name}\n${content}`.toLowerCase();
-  return /(报销|费用|付款|支出|票据|发票)/.test(text) && /(台账|excel|xlsx|模板|登记|清单)/i.test(text);
+  return /(报销|费用|付款|支出|票据|发票)/.test(text) && /(台账|模板|登记)/i.test(name.toLowerCase());
 }
 
 function looksLikeMeetingTracker(name: string, content: string): boolean {
   const text = `${name}\n${content}`.toLowerCase();
-  return /(会议|纪要|督办|待办|事项|闭环)/.test(text) && /(跟踪|清单|台账|excel|xlsx|模板|登记)/i.test(text);
+  return /(会议|纪要|督办|待办|事项|闭环)/.test(text) && /(跟踪|清单|台账|模板|登记)/i.test(name.toLowerCase());
 }
 
 function looksLikeGenericOfficeLedger(name: string, content: string): boolean {
@@ -231,13 +233,13 @@ function looksLikeGenericOfficeLedger(name: string, content: string): boolean {
   if (looksLikeContractLedger(name, content) || looksLikeExpenseLedger(name, content) || looksLikeMeetingTracker(name, content)) {
     return false;
   }
-  return /(台账|清单|报表|登记表|明细表|跟踪表|excel|xlsx|表格)/i.test(text)
+  return /(台账|清单|报表|登记表|明细表|跟踪表|表单|登记簿|审批单|申请表)/i.test(name.toLowerCase())
     && /(办公室|办公|商务|中铁|项目部|部门|责任人|归档|审批|状态|备注|日期|编号)/i.test(text);
 }
 
 function shouldUseDynamicOfficeWorkbook(name: string, content: string): boolean {
   const text = `${name}\n${content}`.toLowerCase();
-  return /(采购|比价|报价|预算|测算|物资|材料|供应商|付款计划|成本)/.test(text)
+  return /(采购|比价|报价|预算|测算|物资|材料|供应商|付款计划|成本|支出|收入|流水|记账|开销|统计)/.test(text)
     && /(台账|清单|报表|登记表|明细表|统计表|汇总表|excel|xlsx|表格)/i.test(text);
 }
 
