@@ -8,8 +8,9 @@
     "chat": "tsx src/server.ts",
     "app": "electron electron/main.cjs",
     "dev": "tsx src/cli.ts",
-    "test": "node --import tsx --test test/*.test.ts",
-    "stress:office50": "tsx scripts/stress-office-50.ts"
+    "test": "npm run typecheck && node --import tsx --test test/*.test.ts",
+    "stress:office50": "tsx scripts/stress-office-50.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

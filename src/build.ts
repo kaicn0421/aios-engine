@@ -285,7 +285,7 @@ function styleDictionary(ws: any, rows: string[][]): void {
   }));
 }
 
-function addSummarySheet(summary: any, title: string, cards: string[][]): void {
+function addSummarySheet(summary: any, title: string, cards: Array<Array<string | number>>): void {
   summary.mergeCells('A1:F1');
   summary.getCell('A1').value = title;
   summary.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
@@ -835,12 +835,13 @@ function normalizePptMarkdown(md: string): string {
     else if (/数据|依据|来源|支撑|附件|口径|说明|背景/.test(line)) buckets.support.push(line);
     else buckets.summary.push(line);
   }
-  const sections: Array<[string, string[]]> = [
+  const candidates: Array<[string, string[]]> = [
     ['重点结论', buckets.summary],
     ['问题与风险', buckets.risk],
     ['下一步安排', buckets.next],
     ['支撑材料', buckets.support],
-  ].filter(([, items]) => items.length);
+  ];
+  const sections = candidates.filter(([, items]) => items.length);
   if (sections.length < 2) return raw;
   return [
     `# ${title}`,

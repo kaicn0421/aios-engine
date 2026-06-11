@@ -857,7 +857,7 @@ export async function buildFreshnessArtifacts(goal: string, results: AgentResult
   writeFileSync(sourcesPath, sourceRows, 'utf8');
 
   const dataRows = extractDataRows(text);
-  const hasLiveRowWithoutExplicitDate = dataRows.some((row) => /today|current|live|วันนี้|ราคาทองวันนี้|ล่าสุด|今日|今天/i.test(row.context));
+  const hasLiveRowWithoutExplicitDate = dataRows.some((row) => /today|current|live|วันนี้|ราคาทองวันนี้|ล่าสุด|今日|今天/i.test(row.context ?? ''));
   const latestDate = dates.at(-1) || (hasLiveRowWithoutExplicitDate ? accessedAt.slice(0, 10) : undefined);
   const verifiedSourceCount = sources.filter((s) => s.ok).length;
   const gaps: string[] = [];

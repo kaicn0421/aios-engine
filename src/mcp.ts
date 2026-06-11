@@ -85,7 +85,7 @@ class MCPConnection {
     // 发送 initialized 通知
     this.proc.stdin?.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
 
-    return initResult;
+    void initResult;
   }
 
   private async send(method: string, params?: Record<string, unknown>): Promise<unknown> {

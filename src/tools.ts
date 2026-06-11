@@ -1197,12 +1197,12 @@ async function toolSubagent(
   try {
     // 动态导入 provider（避免循环依赖）
     const { deepseek, isUsable } = await import('./providers');
-    if (!isUsable(deepseek)) return '子 Agent 不可用：DeepSeek Provider 未配置';
+    if (!isUsable(deepseek) || !deepseek.chatWithTools) return '子 Agent 不可用：DeepSeek Provider 未配置';
 
     const task = args.task.slice(0, 4000);
     const context = (args.context || '').slice(0, 2000);
 
-    const result = await runSubAgent(task, context, ctx.workDir, deepseek, ctx.config.model);
+    const result = await runSubAgent(task, context, ctx.workDir, deepseek as { chatWithTools: Function }, ctx.config.model);
     return `[子 Agent 完成]\n\n${result}`;
   } catch (e) {
     return `子 Agent 执行失败: ${e instanceof Error ? e.message : String(e)}`;
