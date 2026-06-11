@@ -950,7 +950,8 @@ test('office report prompts deliver real editable docx files', async () => {
     const docxQuality = quality.files.find((f: any) => f.name === '采购流程优化建议书.docx');
     assert.ok(docxQuality, JSON.stringify(quality.files));
     assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_heading_hierarchy' && c.ok));
-    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_table_or_action_list' && c.ok));
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_has_action_list' && c.ok));
+    assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_has_native_table'));
     assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_prompt_relevance' && c.ok));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
@@ -1034,6 +1035,47 @@ test('office quality fails when Word content is generic and not prompt-specific'
     const quality = JSON.parse(readFileSync(d.office_quality_manifest!, 'utf8'));
     const docxQuality = quality.files.find((f: any) => f.name === '采购流程优化建议书.docx');
     assert.ok(docxQuality.checks.some((c: any) => c.id === 'docx_prompt_relevance' && !c.ok));
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
+
+test('office quality fails AIOS Claude Code plan when content drifts into generic planning and smart-band case', async () => {
+  const outDir = mkdtempSync(join(tmpdir(), 'aios-engine-aios-plan-drift-'));
+  try {
+    const goal = [
+      '基于 Claude Code 源码分析，展开 AIOS 具体改造计划，重点包括 Memory、Session、Tool Permission、Prompt runtime、MCP、执行内核和交付质量闸',
+      '',
+      '# 用户拖入的文件/文件夹',
+      'claude-code-analysis-main.zip',
+    ].join('\n');
+    const path = await writeDeliverable([
+      '# 计划制定标准与规格规范',
+      '',
+      '## 执行摘要',
+      '本规范旨在为计划制定提供统一、可量化的标准框架，确保计划文档具备可执行性。',
+      '',
+      '## 一、目标定义',
+      '- 使用 SMART 原则。',
+      '- 建立 PDCA 循环。',
+      '',
+      '## 二、案例分析',
+      '本案例以“智护家”智能健康监测手环上市计划为对象，总预算580万元，目标销售额4500万元。',
+      '',
+      '## 三、下一步',
+      '- 完善模板。',
+      '- 培训团队。',
+    ].join('\n'), 'AIOS交付物.docx', outDir);
+    const { manifest } = await buildOfficeQualityArtifacts(
+      goal,
+      [{ name: 'AIOS交付物.docx', path }],
+      outDir,
+      true,
+    );
+    const docx = manifest.files.find((f: any) => f.name === 'AIOS交付物.docx');
+    assert.equal(manifest.status, 'fail', JSON.stringify(manifest));
+    assert.ok(docx?.checks.some((c: any) => c.id === 'docx_prompt_relevance' && !c.ok), JSON.stringify(docx));
+    assert.ok(docx?.checks.some((c: any) => c.id === 'docx_offtopic_terms' && !c.ok), JSON.stringify(docx));
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }

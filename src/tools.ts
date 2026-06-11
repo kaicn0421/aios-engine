@@ -6,6 +6,7 @@ import { execSync, exec } from 'node:child_process';
 import { join, resolve, relative, dirname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ToolDefinition, ToolResult, AgentConfig } from './types';
+import { initMCP, getMCPToolDefinitions, executeMCPTool } from './mcp';
 
 // ── 工具执行上下文 ────────────────────────────────────────
 
@@ -333,6 +334,26 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
 
+  // ── 图片理解 ──
+  {
+    type: 'function',
+    function: {
+      name: 'image_understand',
+      description:
+        '理解图片内容。读取图片文件并用 AI 视觉模型分析其内容。\n' +
+        '支持 PNG/JPG/GIF/WebP/HEIC 等常见格式。\n' +
+        '用途：分析截图、识别照片内容、读取图表/表格、OCR 文字提取。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: '图片文件的绝对路径' },
+          question: { type: 'string', description: '要问的问题，如"这张图里有什么"、"帮我识别文字"等，默认为详细描述图片内容' },
+        },
+        required: ['file_path'],
+      },
+    },
+  },
+
   // ── 代码智能（类 LSP）──
   {
     type: 'function',
@@ -590,6 +611,59 @@ const TYPE_TO_EXT: Record<string, string> = {
   md: '*.md,*.mdx', sh: '*.sh,*.bash,*.zsh',
   sql: '*.sql', vue: '*.vue', svelte: '*.svelte', toml: '*.toml',
 };
+
+// ── 图片理解执行器 ──
+
+async function toolImageUnderstand(
+  args: { file_path: string; question?: string },
+  ctx: ToolContext,
+): Promise<string> {
+  const fp = safePath(ctx.workDir, args.file_path);
+  try {
+    if (!existsSync(fp)) return `文件不存在: ${args.file_path}`;
+    const stat = statSync(fp);
+    const ext = (fp.split('.').pop() || '').toLowerCase();
+    const supported = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tiff', 'heic'];
+    if (!supported.includes(ext)) {
+      return `不支持的图片格式: ${ext}。支持: ${supported.join(', ')}`;
+    }
+    // Base64 encode
+    const buf = readFileSync(fp);
+    const b64 = buf.toString('base64');
+    const mime = ext === 'jpg' ? 'jpeg' : ext;
+    const dataUrl = `data:image/${mime};base64,${b64}`;
+
+    // 找到视觉模型
+    const { ARK, arkClient, CONFIG, llm } = await import('./config');
+    const question = args.question || '请详细描述这张图片的内容，包括文字、物体、颜色、布局等。如果是截图，请描述界面内容和可能的用途。';
+
+    // 优先用 Ark/豆包（支持视觉），其次通义千问 VL
+    if (ARK.apiKey) {
+      const resp = await arkClient.chat.completions.create({
+        model: ARK.model || 'doubao-seed-2-0-lite-260215',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: dataUrl } },
+            { type: 'text', text: question },
+          ],
+        }],
+        max_tokens: 1024,
+      });
+      return resp.choices[0]?.message?.content?.trim() || '(模型返回为空)';
+    }
+
+    // Fallback: DeepSeek 不支持视觉，返回基本信息
+    return [
+      `图片文件: ${args.file_path}`,
+      `大小: ${(stat.size / 1024).toFixed(1)} KB · 格式: ${ext.toUpperCase()}`,
+      '',
+      '⚠️ 当前模型不支持视觉理解。请配置支持视觉的模型（如豆包 doubao-seed-2-0-lite 或通义千问 VL）。',
+    ].join('\n');
+  } catch (e) {
+    return `图片理解失败: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
 
 // ── LSP 代码智能执行器 ──
 
@@ -1452,6 +1526,7 @@ const TOOL_TIMEOUTS: Record<string, number> = {
   web_search: 15_000,
   web_fetch: 15_000,
   task: 10_000,
+  image_understand: 60_000,
   go_to_definition: 30_000,
   find_references: 30_000,
   subagent: 300_000, // 子 Agent 可能多轮
@@ -1482,11 +1557,27 @@ const TOOL_EXECUTORS: Record<
   web_search: toolWebSearch,
   web_fetch: toolWebFetch,
   task: toolTask,
+  image_understand: toolImageUnderstand,
   go_to_definition: toolGoToDefinition,
   find_references: toolFindReferences,
   subagent: toolSubagent,
   aios_brain: toolAiosBrain,
 };
+
+/** 获取完整工具列表（内置 + MCP 扩展） */
+export function getEffectiveToolDefinitions(): ToolDefinition[] {
+  return [...TOOL_DEFINITIONS, ...getMCPToolDefinitions()];
+}
+
+// MCP 初始化标志
+let mcpReady = false;
+
+/** 异步初始化 MCP 工具 */
+export async function ensureMCPTools(): Promise<void> {
+  if (mcpReady) return;
+  await initMCP();
+  mcpReady = true;
+}
 
 /** 执行单个工具调用，返回 ToolResult */
 export async function executeToolCall(
@@ -1495,14 +1586,34 @@ export async function executeToolCall(
   toolCallId: string,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // 先试内置工具
   const executor = TOOL_EXECUTORS[name];
-  if (!executor) {
-    return {
-      tool_call_id: toolCallId,
-      role: 'tool',
-      content: `未知工具: ${name}。当前可用工具: ${Object.keys(TOOL_EXECUTORS).join(', ')}。请选择一个可用的工具重新尝试。`,
-    };
+  if (executor) {
+    return executeBuiltinTool(name, args, toolCallId, ctx, executor);
   }
+  // 再试 MCP 工具
+  try {
+    const parsed = JSON.parse(args);
+    const mcpResult = await executeMCPTool(name, parsed as Record<string, unknown>);
+    if (mcpResult !== null) {
+      return {
+        tool_call_id: toolCallId,
+        role: 'tool',
+        content: mcpResult.length > 20000 ? mcpResult.slice(0, 20000) + '\n\n...(截断)' : mcpResult,
+      };
+    }
+  } catch { /* MCP 调用失败 */ }
+  return {
+    tool_call_id: toolCallId,
+    role: 'tool',
+    content: `未知工具: ${name}。当前可用工具: ${Object.keys(TOOL_EXECUTORS).join(', ')}。请选择一个可用的工具重新尝试。`,
+  };
+}
+
+async function executeBuiltinTool(
+  name: string, args: string, toolCallId: string,
+  ctx: ToolContext, executor: (a: Record<string, unknown>, c: ToolContext) => Promise<string>,
+): Promise<ToolResult> {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(args);

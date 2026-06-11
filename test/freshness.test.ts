@@ -192,6 +192,18 @@ test('freshness extractor handles Thai gold price evidence and Buddhist dates', 
   assert.ok(rows.some((row) => row.date_text === '2026-06-06' && row.value === '69,150' && row.unit === 'baht/baht-weight'), JSON.stringify(rows));
 });
 
+test('internal work documents are not misclassified as live market-data deliveries', () => {
+  // 真机 E2E 2026-06-11:"本周"(时间词)+"项目"(数据词)把《AIOS项目本周周报》
+  // 误判成价格类任务 → 网页取证 0 来源 → DATA_GAP 兜底空壳 docx(content_accuracy=0)。
+  // 周报/月报/纪要/总结是内部文档,除非点名硬市场词,不进 freshness 取证闸。
+  assert.equal(needsFreshnessEvidence('写一份AIOS项目本周周报,重点是可靠性优化,导出Word文档'), false);
+  assert.equal(needsFreshnessEvidence('帮我写本月项目工作总结'), false);
+  assert.equal(needsFreshnessEvidence('整理一下今天的会议纪要'), false);
+  // 反例:带硬市场词的周报仍然要走取证(水泥价格周报是真数据交付)
+  assert.equal(needsFreshnessEvidence('做一份本周水泥价格周报'), true);
+  assert.equal(needsFreshnessEvidence('今天泰国黄金价格 简短给来源'), true);
+});
+
 test('research evidence detector requires sources for strategic business plans without treating them as live prices', async () => {
   const prompt = '我想在宁波开启一个餐饮项目 目标是做到上市 准备做泰餐 你帮我调研后制定相关计划 pdf';
   assert.equal(needsFreshnessEvidence(prompt), false);

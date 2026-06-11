@@ -927,6 +927,13 @@ async function toPptx(md: string, fp: string): Promise<void> {
 /** 按文件名扩展名写交付文件:docx/pdf/xlsx/pptx 自动转换并补齐工具,其余按文本写 */
 export async function writeDeliverable(output: string, name: string, dir: string): Promise<string> {
   const ext = (name.split('.').pop() || 'md').toLowerCase();
+  // 空内容 kill-switch:模型输出退化成空白时,过去仍会写出带封面页的合法空壳 OOXML
+  // (7-8KB,"打得开但什么都没有")。直接失败让上游走返修,而不是把空壳交付给用户。
+  if (['docx', 'pdf', 'pptx', 'xlsx'].includes(ext) && output.trim().length < 30) {
+    throw new Error(
+      `deliverable_empty_content:${name} 的生成内容为空或过短(${output.trim().length} 字符),拒绝写出空壳文件`,
+    );
+  }
   const fp = join(dir, name);
   if (ext === 'docx') await toDocx(output, fp);
   else if (ext === 'pdf') await toPdf(output, fp);

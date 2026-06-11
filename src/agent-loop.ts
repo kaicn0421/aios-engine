@@ -3,7 +3,7 @@
 
 import { CONFIG } from './config';
 import { deepseek, isUsable, markFailed, type Provider } from './providers';
-import { TOOL_DEFINITIONS, executeToolCall, type ToolContext } from './tools';
+import { TOOL_DEFINITIONS, executeToolCall, type ToolContext, getEffectiveToolDefinitions } from './tools';
 import { buildSystemPrompt } from './system-prompt';
 import { estimateTokens, compactHistory, createFailureTracker, recordFailure, resetConsecutiveFailures } from './context';
 import { createTrace, traceTurn, traceTool, traceFinalize, recordToolStats, toolStatsReport, saveCheckpoint, markCheckpointResolved } from './trace';
@@ -92,6 +92,10 @@ export async function runAgent(
   if (effectiveModel !== config.model) {
     emit({ type: 'tool_done', name: 'model_router', ok: true, summary: `使用 ${effectiveModel.replace('deepseek-', '')}` });
   }
+  // 初始化 MCP 工具
+  const { ensureMCPTools } = await import('./tools');
+  await ensureMCPTools();
+  const effectiveTools = getEffectiveToolDefinitions();
   const systemPrompt = buildSystemPrompt(config.workDir, process.platform || 'darwin', userMessage);
 
   // 初始化 trace
@@ -155,7 +159,7 @@ export async function runAgent(
         let streamedText = '';
         const result = await provider.chatWithTools!(effectiveModel, {
           messages,
-          tools: TOOL_DEFINITIONS,
+          tools: effectiveTools,
           temperature: config.temperature,
           reasoningEffort: CONFIG.agent.reasoningEffort, // ← Thinking 模式
           stream: true,
@@ -191,7 +195,7 @@ export async function runAgent(
           try {
             const fb = await provider.chatWithTools!(CONFIG.models.flash, {
               messages,
-              tools: TOOL_DEFINITIONS,
+              tools: effectiveTools,
               temperature: config.temperature,
               stream: false,
             });
@@ -295,7 +299,7 @@ export async function runAgent(
             try {
               const retryResp = await provider.chatWithTools!(effectiveModel, {
                 messages,
-                tools: TOOL_DEFINITIONS,
+                tools: effectiveTools,
                 temperature: 0.1,       // 低温度 = 精确修正
                 stream: false,          // 非流式 = 快速
               });

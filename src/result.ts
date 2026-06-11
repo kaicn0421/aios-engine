@@ -89,6 +89,27 @@ function manifestFileEntry(file: { name: string; path: string }, primary: string
   };
 }
 
+/** manifest 单一权威状态:与 Rust 端 delivery_completion_message 同源信号,
+ *  让任何读 manifest 的人不必从 compliance/satisfaction/smoke 自己重算。
+ *  注:Rust 端还有路径存在性/格式等额外闸,最终用户可见状态以 Rust 为准;
+ *  这里是 engine 侧 best-effort 汇总。 */
+function deliveryManifestStatus(
+  compliance: 'pass' | 'fail',
+  smoke: { status?: string },
+  quality: { manifest: { status: string } } | undefined,
+  satisfaction: { verdict?: string; score?: number; first_pass_usable?: boolean } | undefined,
+): 'completed' | 'needs_repair' {
+  if (compliance === 'fail') return 'needs_repair';
+  if (smoke?.status === 'fail') return 'needs_repair';
+  if (quality && quality.manifest.status === 'fail') return 'needs_repair';
+  if (satisfaction) {
+    const score = typeof satisfaction.score === 'number' ? satisfaction.score : 100;
+    const firstPass = satisfaction.first_pass_usable === true;
+    if (satisfaction.verdict === 'needs_repair' || (!firstPass && score < 80)) return 'needs_repair';
+  }
+  return 'completed';
+}
+
 function deliverySmoke(
   entries: DeliveryManifestFile[],
   primary: string,
@@ -471,6 +492,10 @@ export async function assemble(
       understanding: plan.understanding,
       domain: 'fidic_contract_radar',
       primary,
+      status: deliveryManifestStatus(
+        smoke.status === 'fail' || (quality && quality.manifest.status !== 'pass') ? 'fail' : 'pass',
+        smoke, quality, taskSatisfaction,
+      ),
       required_formats: ['docx', 'xlsx'],
       format_contract: {
         requested_formats: ['docx', 'xlsx'],
@@ -568,19 +593,63 @@ export async function assemble(
         groups.set(name, parts);
       }
     }
+    const degradedFormats: Array<{ name: string; ext: string; reason: string }> = [];
     for (const [name, parts] of groups) {
       const content = parts.join('\n\n');
       emit({ type: 'result.step', stage: 'write', message: 'Writing editable deliverable', detail: name });
-      const fp = await writeDeliverable(content, name, dir);
-      files.push({ name, path: fp });
+      let writtenName = name;
+      let fp: string;
+      try {
+        fp = await writeDeliverable(content, name, dir);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        // PDF 在无 Chromium 环境(干净 Windows)必失败:主文件降级为可编辑 docx,
+        // 不让渲染器缺失毁掉整单交付。空内容错误不降级(降级救不了,该走返修)。
+        if (extOf(name) === 'pdf' && !reason.includes('deliverable_empty_content')) {
+          writtenName = sanitizeName(`${withoutExt(name)}.docx`);
+          emit({ type: 'result.step', stage: 'write', message: 'PDF degraded to editable source', detail: `${name}: ${reason}` });
+          degradedFormats.push({ name, ext: 'pdf', reason });
+          fp = await writeDeliverable(content, writtenName, dir);
+        } else {
+          throw err;
+        }
+      }
+      files.push({ name: writtenName, path: fp });
       for (const ext of requiredFormats) {
-        if (ext === extOf(name)) continue;
-        const extraName = sanitizeName(`${withoutExt(name)}.${ext}`);
+        if (ext === extOf(writtenName)) continue;
+        if (degradedFormats.some((d) => d.ext === ext)) continue;
+        const extraName = sanitizeName(`${withoutExt(writtenName)}.${ext}`);
         if (files.some((f) => f.name === extraName)) continue;
         emit({ type: 'result.step', stage: 'write', message: 'Writing requested companion format', detail: extraName });
-        const extraPath = await writeDeliverable(content, extraName, dir);
-        files.push({ name: extraName, path: extraPath });
+        try {
+          const extraPath = await writeDeliverable(content, extraName, dir);
+          files.push({ name: extraName, path: extraPath });
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          if (ext === 'pdf' && !reason.includes('deliverable_empty_content')) {
+            emit({ type: 'result.step', stage: 'write', message: 'Companion PDF degraded', detail: `${extraName}: ${reason}` });
+            degradedFormats.push({ name: extraName, ext, reason });
+          } else {
+            throw err;
+          }
+        }
       }
+    }
+    if (degradedFormats.length) {
+      // 降级格式从 requiredFormats 摘除:烟测/满意度按"实际承诺"验收,降级事实单独留痕
+      for (const degraded of degradedFormats) {
+        const at = requiredFormats.indexOf(degraded.ext);
+        if (at >= 0) requiredFormats.splice(at, 1);
+      }
+      const notePath = join(dir, 'PDF降级说明.txt');
+      writeFileSync(notePath, [
+        '本次交付环境缺少可用的 Chromium/Chrome/Edge,以下 PDF 未生成:',
+        ...degradedFormats.map((d) => `- ${d.name}:${d.reason}`),
+        '',
+        '可编辑源文件已完整交付,内容不受影响。',
+        '安装 Chrome/Edge,或设置 AIOS_PDF_BROWSER_PATH 指向浏览器后重试即可生成 PDF。',
+      ].join('\n'), 'utf8');
+      files.push({ name: 'PDF降级说明.txt', path: notePath });
     }
     const sourceContent = [
       `# ${plan.goal}`,
@@ -672,6 +741,7 @@ export async function assemble(
       goal: plan.goal,
       understanding: plan.understanding,
       primary,
+      status: deliveryManifestStatus(deliveryCompliance, smoke, quality, taskSatisfaction),
       required_formats: requiredFormats,
       format_contract: {
         requested_formats: requiredFormats,

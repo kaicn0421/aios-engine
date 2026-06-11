@@ -4,10 +4,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { assertKey } from './config';
 import { run } from './orchestrator';
+import { runAgent, defaultAgentConfig } from './agent-loop';
 import { clarify } from './clarify';
+import type { AgentEvent } from './types';
 
 const PORT = Number(process.env.PORT) || 8799;
 const PAGE = join(process.cwd(), 'public', 'chat.html');
+const OUTPUT_ROOT = process.env.AIOS_ENGINE_OUTPUT_DIR || join(process.cwd(), 'output');
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
@@ -50,7 +53,7 @@ const server = createServer(async (req, res) => {
     const name = decodeURIComponent(url.pathname.slice('/artifact/'.length));
     if (!/^aios-artifact-\d+\.html$/.test(name)) { res.writeHead(400); res.end('bad name'); return; }
     try {
-      const html = readFileSync(join(process.cwd(), 'output', name), 'utf8');
+      const html = readFileSync(join(OUTPUT_ROOT, name), 'utf8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
     } catch { res.writeHead(404); res.end('not found'); }
@@ -62,7 +65,7 @@ const server = createServer(async (req, res) => {
     const rel = decodeURIComponent(url.pathname.slice('/project/'.length));
     if (rel.includes('..') || !/^aios-\d+\/[^/]+$/.test(rel)) { res.writeHead(400); res.end('bad path'); return; }
     try {
-      const fp = join(process.cwd(), 'output', rel);
+      const fp = join(OUTPUT_ROOT, rel);
       const ext = (rel.split('.').pop() || '').toLowerCase();
       const fname = rel.split('/').pop() || 'file';
       if (ext === 'html') {
@@ -128,6 +131,17 @@ const server = createServer(async (req, res) => {
         Connection: 'keep-alive',
       });
       const send = (e: unknown) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+      const started = Date.now();
+      let beat = 0;
+      const heartbeat = setInterval(() => {
+        beat += 1;
+        send({
+          type: 'progress',
+          label: 'Still working',
+          detail: `后台仍在运行,已持续约 ${Math.floor((Date.now() - started) / 1000)} 秒`,
+          beat,
+        });
+      }, 15000);
       try {
         const goal = String((JSON.parse(body || '{}') as { goal?: unknown }).goal || '').trim();
         if (!goal) {
@@ -137,6 +151,8 @@ const server = createServer(async (req, res) => {
         }
       } catch (e) {
         send({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+      } finally {
+        clearInterval(heartbeat);
       }
       res.write('event: end\ndata: {}\n\n');
       res.end();
@@ -163,6 +179,35 @@ const server = createServer(async (req, res) => {
     }
     res.write('event: end\ndata: {}\n\n');
     res.end();
+    return;
+  }
+
+  // Agent 模式:POST body 传 goal,用 SSE 推送多轮工具调用事件
+  if (url.pathname === '/api/agent' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', async () => {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      const send = (e: AgentEvent) => res.write(`data: ${JSON.stringify(e)}\n\n`);
+      try {
+        const goal = String((JSON.parse(body || '{}') as { goal?: unknown }).goal || '').trim();
+        if (!goal) {
+          send({ type: 'error', message: 'missing goal' });
+        } else {
+          const config = defaultAgentConfig(process.cwd());
+          const result = await runAgent(goal, send, config);
+          send({ type: 'done', result });
+        }
+      } catch (e) {
+        send({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+      }
+      res.write('event: end\ndata: {}\n\n');
+      res.end();
+    });
     return;
   }
 

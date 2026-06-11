@@ -31,6 +31,113 @@ async function completeHtml(provider: Provider, model: string, system: string, o
   return out;
 }
 
+function targetOfficeSize(goal: string, sub: SubTask): { pages: number; slides: number } {
+  const text = `${goal}\n${sub.objective}`.replace(/，/g, ',');
+  let pages = 0;
+  let slides = 0;
+  const re = /(\d{1,3})\s*(页|頁|p|pages?|张|張|slides?|slides|幻灯片|投影片)/gi;
+  for (const m of text.matchAll(re)) {
+    const n = Math.max(1, Math.min(80, Number(m[1] || 0)));
+    const unit = String(m[2] || '').toLowerCase();
+    if (!n) continue;
+    if (/张|張|slide|幻灯片|投影片/.test(unit)) slides = Math.max(slides, n);
+    else pages = Math.max(pages, n);
+  }
+  if (/pptx?|powerpoint|幻灯片|演示|汇报/.test(`${sub.outFile || ''}\n${goal}`.toLowerCase()) && pages && !slides) {
+    slides = pages;
+    pages = 0;
+  }
+  return { pages, slides };
+}
+
+function estimateDocumentPages(markdown: string): number {
+  const plain = markdown
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/[#>*_`|:-]/g, '')
+    .replace(/\s+/g, '');
+  return Math.max(1, Math.ceil(plain.length / 760));
+}
+
+function pptContentSlideCount(markdown: string): number {
+  const headingSlides = (markdown.match(/^#{1,3}\s*第\s*\d+\s*(页|頁|张|張|slide|幻灯片)?[:：]/gim) || []).length;
+  if (headingSlides) return headingSlides;
+  const headings = (markdown.match(/^#{1,3}\s+/gm) || []).length;
+  return Math.max(0, headings - 1);
+}
+
+function officeExt(sub: SubTask): string {
+  return (sub.outFile?.split('.').pop() || '').toLowerCase();
+}
+
+async function completeOfficeOutput(
+  provider: Provider,
+  model: string,
+  sub: SubTask,
+  goal: string,
+  output: string,
+): Promise<string> {
+  const ext = officeExt(sub);
+  if (!['docx', 'pdf', 'pptx'].includes(ext)) return output;
+  const target = targetOfficeSize(goal, sub);
+  if (ext === 'pptx') {
+    const wanted = target.slides || 0;
+    if (wanted <= 0) return output;
+    let out = output;
+    let rounds = 0;
+    while (pptContentSlideCount(out) < wanted && rounds < 10) {
+      rounds++;
+      const have = pptContentSlideCount(out);
+      const from = have + 1;
+      const to = Math.min(wanted, have + 8);
+      const cont = await provider.chat(model, {
+        system: '你是严谨的商务 PPT 内容续写助手。只输出可直接拼接到原 Markdown 后面的内容。',
+        user:
+          `整体目标:${goal}\n\n` +
+          `这份 PPT 至少需要 ${wanted} 页,当前只有约 ${have} 页。` +
+          `请继续写第 ${from} 页到第 ${to} 页。\n\n` +
+          `硬规则:\n` +
+          `- 每页必须用 "## 第N页: 标题" 开头。\n` +
+          `- 每页 4-6 条要点,一页一个观点,适合办公室汇报。\n` +
+          `- 不要重复已有页面,不要解释,不要代码块。\n\n` +
+          `已有内容末尾:\n${out.slice(-5000)}`,
+        maxTokens: 8192,
+        temperature: 0.45,
+      });
+      if (!cont.trim()) break;
+      out += `\n\n${cont.trim()}`;
+    }
+    return out;
+  }
+
+  const wanted = target.pages || 0;
+  if (wanted <= 0) return output;
+  let out = output;
+  let rounds = 0;
+  while (estimateDocumentPages(out) < wanted && rounds < 12) {
+    rounds++;
+    const have = estimateDocumentPages(out);
+    const cont = await provider.chat(model, {
+      system: '你是正式商务文档续写助手。只输出可直接拼接到原 Markdown 后面的新章节内容。',
+      user:
+        `整体目标:${goal}\n\n` +
+        `这份 ${ext.toUpperCase()} 至少需要 ${wanted} 页,当前估算约 ${have} 页。` +
+        `请继续补充新的正式章节,每轮约 2500-3500 个中文字符。\n\n` +
+        `硬规则:\n` +
+        `- 使用清晰标题层级、表格或清单、结论和下一步。\n` +
+        `- 不要重复已有段落,不要解释,不要代码块。\n` +
+        `- 内容必须贴合用户任务,不能用占位话。\n\n` +
+        `已有内容末尾:\n${out.slice(-6000)}`,
+      maxTokens: 8192,
+      temperature: 0.45,
+    });
+    if (!cont.trim()) break;
+    out += `\n\n${cont.trim()}`;
+  }
+  return out;
+}
+
 function officeExecutionInstruction(sub: SubTask): string {
   const ext = (sub.outFile?.split('.').pop() || '').toLowerCase();
   if (ext === 'xlsx') {
@@ -50,6 +157,7 @@ function officeExecutionInstruction(sub: SubTask): string {
       '- 必须按幻灯片分页输出,用 "## 第N页: 标题" 标识每页。',
       '- 每页只放一个主要观点,包含重点结论、问题风险、下一步安排等真实汇报逻辑。',
       '- 禁止把整篇长文堆成一页。',
+      '- 如果用户要求很多页/很多张,先按页数目标输出,内容不够时引擎会自动续写,不要提前收尾。',
     ].join('\n');
   }
   if (ext === 'docx' || ext === 'pdf') {
@@ -58,6 +166,7 @@ function officeExecutionInstruction(sub: SubTask): string {
       '【Word/PDF 输出硬规则】',
       '- 必须输出正式材料结构:标题、执行摘要/结论、正文分节、表格或行动清单、风险与下一步。',
       '- 禁止只写提纲、占位语或“已完成”。',
+      '- 如果用户要求很多页,必须按篇幅目标持续展开,不要提前总结收尾。',
     ].join('\n');
   }
   return '';
@@ -147,6 +256,7 @@ export async function runAgent(
         output = await completeHtml(usedP, usedModel, skill.system, fixed);
       }
     }
+    output = await completeOfficeOutput(usedP, usedModel, sub, goal, output);
     if (!output) output = '(空)';
     // kNN 自学习:记录本次客观质量(造物看可玩性、其余视为成功产出),供后续相似任务路由微调
     recordOutcome(sub.objective, sub.skill, tag, sub.skill === 'code' ? (lastPlayable ? 1 : 0.4) : 0.85);

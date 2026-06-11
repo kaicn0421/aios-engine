@@ -1,5 +1,36 @@
-import 'dotenv/config';
 import OpenAI from 'openai';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+/** 零依赖 .env 加载(替代 dotenv)。
+ *  dotenv 是 CJS,被 esbuild 打成单文件 ESM bundle 后曾两次在打包产物里崩:
+ *  ERR_MODULE_NOT_FOUND(06-08)+ Dynamic require not supported(06-09)。
+ *  行为对齐 dotenv 默认:读 cwd 下 .env、KEY=VALUE、跳过注释/空行、
+ *  不覆盖已存在的环境变量、去首尾引号、双引号内展开 \n;文件不存在则静默跳过。 */
+function loadDotEnv(): void {
+  let raw: string;
+  try {
+    raw = readFileSync(resolve(process.cwd(), '.env'), 'utf8');
+  } catch {
+    return;
+  }
+  for (const line of raw.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m || !m[1]) continue;
+    const key = m[1];
+    let value = (m[2] ?? '').trim();
+    if (value.length >= 2 && value[0] === '"' && value[value.length - 1] === '"') {
+      value = value.slice(1, -1).replace(/\\n/g, '\n').replace(/\\r/g, '\r');
+    } else if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") {
+      value = value.slice(1, -1);
+    } else {
+      const hash = value.indexOf('#');
+      if (hash >= 0) value = value.slice(0, hash).trim();
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+loadDotEnv();
 
 export const CONFIG = {
   apiKey: process.env.DEEPSEEK_API_KEY || '',

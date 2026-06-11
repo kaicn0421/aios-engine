@@ -8,6 +8,80 @@ import type { Plan, SubTask, SkillName } from './types';
 // 动态从 Skill 库取,以后加 Skill 不用改这里
 const VALID = Object.keys(SKILLS) as SkillName[];
 
+function businessPlanSubtasks(goal: string, outFile?: string): SubTask[] {
+  const standard: SubTask = {
+    id: 's1',
+    title: '确立商业计划书的标准与规格',
+    objective:
+      '查实并确立本任务需要遵循的商业计划书结构、宁波本地餐饮调研口径、上市路径材料标准和评价标准。输出后续章节必须遵守的结构、证据边界和质量要求。',
+    skill: 'research',
+    complexity: 'standard',
+    dependsOn: [],
+  };
+  const sections: Array<[string, string, SkillName, 'standard' | 'deep']> = [
+    ['市场分析与客群定位', '围绕宁波餐饮消费、泰餐品类机会、目标客群、竞品格局、选址逻辑和差异化定位产出完整章节。必须区分已知事实、合理假设和待核验数据。', 'research', 'deep'],
+    ['品牌定位与产品策略', '设计从第一家店开始可复制的泰餐品牌定位、菜单结构、价格带、门店体验、供应链和食品安全标准。内容要能指导真实开店。', 'planning', 'deep'],
+    ['门店模型与扩张计划', '拆解首店模型、标准店模型、区域复制、组织能力、供应链建设、数字化系统和10年扩张节奏。必须给出阶段目标和关键动作。', 'planning', 'deep'],
+    ['财务测算与融资上市路径', '建立收入、成本、毛利、人效、坪效、现金流、融资轮次、治理规范和上市路径测算。数字没有来源时必须标注为假设。', 'finance', 'deep'],
+    ['风险清单与执行里程碑', '输出食品安全、合规、选址、供应链、资金、团队、品牌和上市规范风险清单,并给出30/90/180天与1/3/5/10年行动里程碑。', 'analysis', 'standard'],
+  ];
+  return [
+    standard,
+    ...sections.map((s, i): SubTask => ({
+      id: `s${i + 2}`,
+      title: s[0],
+      objective: `严格按 s1 确立的标准产出"${s[0]}"章节。\n整体目标:${goal}\n${s[1]}`,
+      skill: s[2],
+      complexity: s[3],
+      dependsOn: ['s1'],
+      outFile,
+    })),
+  ];
+}
+
+export function localFallbackPlan(goal: string, reason: string = 'brain_timeout'): Plan {
+  const officeFormats = officeFormatsFromGoal(goal);
+  const freshnessRequired = needsFreshnessEvidence(goal);
+  const kind: Plan['kind'] = officeFormats.length || freshnessRequired ? 'document' : 'document';
+  const primary = officeFormats[0] || 'docx';
+  const outFile = defaultOutFileForFormat(goal, primary);
+  const isBusinessPlan = /上市|商业计划|餐饮|泰餐|门店|融资|扩张|宁波|公司|企业/.test(goal);
+  const subtasks = isBusinessPlan
+    ? businessPlanSubtasks(goal, outFile)
+    : [
+        {
+          id: 's1',
+          title: '整理需求与交付标准',
+          objective: `在 Brain 规划超时后,先用本地兜底计划整理用户需求、交付格式和质量标准。\n整体目标:${goal}`,
+          skill: 'research' as SkillName,
+          complexity: 'standard' as const,
+          dependsOn: [],
+        },
+        {
+          id: 's2',
+          title: '生成可交付正文',
+          objective: `严格围绕用户目标生成可直接使用的正式材料,避免空话和占位内容。\n整体目标:${goal}`,
+          skill: 'writing' as SkillName,
+          complexity: 'deep' as const,
+          dependsOn: ['s1'],
+          outFile,
+        },
+      ];
+
+  const formats = officeFormats.length ? officeFormats : ['docx'];
+  for (const sub of subtasks) {
+    if (sub.outFile) {
+      sub.objective += `\n本任务必须产出 ${formats.map((f) => `.${f}`).join('/')} 可编辑/可交付文件,禁止输出 HTML artifact 冒充办公文件。`;
+    }
+  }
+  return {
+    goal,
+    understanding: `已按本地兜底规划处理: ${goal}`,
+    kind,
+    subtasks,
+  };
+}
+
 export async function plan(goal: string, memory: string = ''): Promise<Plan> {
   const system =
 `你是 AIOS 的任务规划中枢(AIOS Brain)。用户给你一句话目标,你要:
@@ -38,6 +112,7 @@ outFile 规则:【同一份成果的所有章节子任务必须用同一个 outF
 - PPT:必须像办公室汇报,一页一个观点,包含封面、目录/汇报逻辑、重点工作/问题风险/下一步,正文不要堆长段。
 - Excel:必须是可编辑工作簿,字段适合实际登记,包含字段说明、状态/类别下拉、公式列、统计看板、冻结表头和打印友好设置;禁止输出 HTML 预览冒充 Excel。
 - 合同/费用/会议/资料归档/事项跟踪/清单/报表等办公室场景,默认按中铁办公室人员日常使用习惯设计:编号、日期、责任部门、责任人、状态、风险、归档位置、下一步动作必须尽量结构化。
+- FIDIC/菲迪克/工程合同/索赔/Notice/Time-Bar/DAAB/变更/付款/BOQ 类任务,默认进入"合同雷达"工作流:先读项目资料和合同文本,输出风险、时限、索赔机会、证据缺口和拟发函;没有来源时必须标缺口,不得冒充法律意见。
 
 只输出 JSON(不要代码块、不要多余文字):
 {

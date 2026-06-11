@@ -8,12 +8,13 @@
     "chat": "tsx src/server.ts",
     "app": "electron electron/main.cjs",
     "dev": "tsx src/cli.ts",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "stress:office50": "tsx scripts/stress-office-50.ts"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "html-to-docx": "^1.8.0",
+    "jszip": "^3.10.1",
     "marked": "^18.0.4",
     "openai": "^4.67.3",
     "pptxgenjs": "^4.0.1",
@@ -25,5 +26,8 @@
     "esbuild": "^0.27.2",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

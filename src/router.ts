@@ -66,3 +66,13 @@ export function routeChain(sub: SubTask): Route[] {
 
 // 单选:取候选链首选 —— 向后兼容入口
 export function route(sub: SubTask): Route { return routeChain(sub)[0]!; }
+
+// ── Agent 模式专用路由 ──
+
+/** Agent 模式路由：直接选最强可用模型（DeepSeek V4 Pro），不做 cost/skill 评估 */
+export function routeAgent(): Route {
+  if (isUsable(deepseek)) {
+    return { provider: 'deepseek', model: CONFIG.models.strong, reason: 'Agent 模式: DeepSeek V4 Pro (强推理+工具调用)' };
+  }
+  return { provider: 'qwen', model: QWEN.model, reason: 'Agent 模式: 千问 (DeepSeek 不可用时的备选)' };
+}

@@ -9,3 +9,4 @@ routing-history.jsonl
 dist/
 coverage/
 tmp/
+.aios-traces/
